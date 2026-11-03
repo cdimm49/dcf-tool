@@ -4,6 +4,37 @@ import yfinance as yf
 
 
 @st.cache_data(ttl=3600)
+def _get_risk_free_yield():
+    try:
+        history = yf.Ticker("^TNX").history(period="5d")
+        if history is not None and not history.empty:
+            value = history["Close"].dropna()
+            if not value.empty:
+                return float(value.iloc[-1])
+    except Exception:
+        return None
+    return None
+
+
+def _latest_diluted_shares(income_statement):
+    if income_statement is not None:
+        share_rows = {
+            "dilutedaverageshares",
+            "dilutedaveragesharesoutstanding",
+            "dilutedshares",
+        }
+        for row in income_statement.index:
+            normalized = "".join(
+                character for character in str(row).lower() if character.isalnum()
+            )
+            if normalized in share_rows:
+                values = pd.to_numeric(income_statement.loc[row], errors="coerce").dropna()
+                if not values.empty and values.iloc[0] > 0:
+                    return float(values.iloc[0]), "Most recent diluted average shares"
+    return None, None
+
+
+@st.cache_data(ttl=3600)
 def get_company_data(ticker):
     try:
         symbol = ticker.strip().upper()
@@ -46,11 +77,15 @@ def get_company_data(ticker):
             except Exception:
                 pass
 
-        diluted_shares = None
+        diluted_shares, diluted_shares_source = _latest_diluted_shares(
+            income_statement
+        )
         try:
-            shares = info["sharesOutstanding"]
-            if shares is not None and not pd.isna(shares):
-                diluted_shares = shares
+            if diluted_shares is None:
+                shares = info["sharesOutstanding"]
+                if shares is not None and not pd.isna(shares):
+                    diluted_shares = shares
+                    diluted_shares_source = "Most recent yfinance shares outstanding"
         except Exception:
             pass
 
@@ -59,6 +94,7 @@ def get_company_data(ticker):
                 shares = company.fast_info["shares"]
                 if shares is not None and not pd.isna(shares):
                     diluted_shares = shares
+                    diluted_shares_source = "Most recent yfinance shares outstanding"
             except Exception:
                 pass
 
@@ -93,6 +129,9 @@ def get_company_data(ticker):
             "diluted_shares_outstanding": (
                 float(diluted_shares) if diluted_shares is not None else None
             ),
+            "diluted_shares_source": diluted_shares_source,
+            "beta": info.get("beta"),
+            "risk_free_rate": _get_risk_free_yield(),
             "income_statement": income_statement,
             "balance_sheet": balance_sheet,
             "cash_flow_statement": cash_flow_statement,
