@@ -1,5 +1,7 @@
 import streamlit as st
+from data.clean import add_income_margins, clean_statement
 from data.fetch import get_company_data
+from ui.tables import display_statement
 
 st.set_page_config(layout="wide")
 st.title("DCF Tool")
@@ -24,19 +26,22 @@ if submitted:
         )
 
         with income_tab:
-            st.dataframe(
-                company_data["income_statement"],
-                alt="Raw income statement",
+            income_statement = add_income_margins(
+                clean_statement(company_data["income_statement"], "income")
             )
+            display_statement(income_statement)
+            st.caption("USD millions, fiscal years")
 
         with balance_tab:
-            st.dataframe(
-                company_data["balance_sheet"],
-                alt="Raw balance sheet",
+            balance_sheet = clean_statement(
+                company_data["balance_sheet"], "balance"
             )
+            display_statement(balance_sheet)
+            st.caption("USD millions, fiscal years")
 
         with cash_flow_tab:
-            st.dataframe(
-                company_data["cash_flow_statement"],
-                alt="Raw cash flow statement",
+            cash_flow_statement = clean_statement(
+                company_data["cash_flow_statement"], "cashflow"
             )
+            display_statement(cash_flow_statement)
+            st.caption("USD millions, fiscal years")
