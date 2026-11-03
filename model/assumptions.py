@@ -118,17 +118,31 @@ def _working_capital_ratio(income, cashflow):
             current_revenue is not None
             and prior_revenue is not None
             and cashflow_value is not None
-            and current_revenue > prior_revenue
         ):
+            revenue_change = current_revenue - prior_revenue
+            if revenue_change <= 0 or revenue_change < current_revenue * 0.01:
+                return (
+                    0.05,
+                    "Fallback 5%; revenue change was negative or less than 1% of revenue.",
+                )
             # Cash-flow statements report working-capital investment as a cash outflow.
-            ratios.append(-cashflow_value / (current_revenue - prior_revenue))
+            ratio = -cashflow_value / revenue_change
+            if not 0 <= ratio <= 0.20:
+                return (
+                    0.05,
+                    "Fallback 5%; a historical working-capital ratio was outside 0%-20%.",
+                )
+            ratios.append(ratio)
         if len(ratios) == 3:
             break
     if not ratios:
-        return 0.05, "Assumed 5%; historical working-capital investment could not be calculated."
-    average_ratio = sum(ratios) / len(ratios)
-    return min(max(average_ratio, 0.0), 0.20), (
-        f"Average historical working-capital investment / revenue change, clamped to 0%-20%."
+        return (
+            0.05,
+            "Fallback 5%; historical working-capital investment could not be calculated.",
+        )
+    return sum(ratios) / len(ratios), (
+        "Average historical working-capital investment / revenue change; "
+        "all included years had revenue growth of at least 1% and ratios of 0%-20%."
     )
 
 
@@ -145,9 +159,40 @@ def _risk_free_rate(market_data):
     return rate, "Current ^TNX 10-year Treasury yield, normalized to a decimal rate."
 
 
-def default_assumptions(cleaned_income, cleaned_balance, cleaned_cashflow, market_data):
+def default_assumptions(
+    cleaned_income,
+    cleaned_balance,
+    cleaned_cashflow,
+    market_data,
+    include_securities=True,
+):
     """Derive run_dcf inputs and short explanations from cleaned statements and quotes."""
     market_data = market_data or {}
+    reported_cash = _recent_value(cleaned_balance, "Cash")
+    combined_cash = _recent_value(
+        cleaned_balance, "Cash and short-term investments total"
+    )
+    cash_uses_combined_total = reported_cash is None and combined_cash is not None
+    if cash_uses_combined_total:
+        reported_cash = combined_cash
+    reported_cash = reported_cash if reported_cash is not None else 0.0
+    short_term_securities = _recent_value(
+        cleaned_balance, "Short-term marketable securities"
+    )
+    short_term_securities_derived = False
+    if cash_uses_combined_total:
+        short_term_securities = 0.0
+    elif short_term_securities is None and combined_cash is not None:
+        short_term_securities = max(combined_cash - reported_cash, 0.0)
+        short_term_securities_derived = True
+    short_term_securities = short_term_securities or 0.0
+    long_term_securities = (
+        _recent_value(cleaned_balance, "Long-term marketable securities") or 0.0
+    )
+    securities_included = bool(include_securities)
+    included_securities = (
+        short_term_securities + long_term_securities if securities_included else 0.0
+    )
     assumptions = {
         "base_revenue": _recent_value(cleaned_income, "Revenue"),
         "growth_rates": None,
@@ -161,7 +206,11 @@ def default_assumptions(cleaned_income, cleaned_balance, cleaned_cashflow, marke
         "terminal_growth": 0.025,
         "exit_ebitda_multiple": 0.0,
         "debt": _recent_value(cleaned_balance, "Total Debt"),
-        "cash": _recent_value(cleaned_balance, "Cash"),
+        "cash": reported_cash + included_securities,
+        "reported_cash": reported_cash,
+        "short_term_securities": short_term_securities,
+        "long_term_securities": long_term_securities,
+        "include_securities": securities_included,
         "diluted_shares": None,
         "mid_year": False,
     }
@@ -178,7 +227,11 @@ def default_assumptions(cleaned_income, cleaned_balance, cleaned_cashflow, marke
         "terminal_growth": "Assumed 2.5% long-term growth rate.",
         "exit_ebitda_multiple": "",
         "debt": "Most recent reported total debt, in USD millions.",
-        "cash": "Most recent reported cash, in USD millions.",
+        "cash": "",
+        "reported_cash": "",
+        "short_term_securities": "",
+        "long_term_securities": "",
+        "include_securities": "Securities are included in cash by default.",
         "diluted_shares": "Unavailable; no positive yfinance share count was found.",
         "mid_year": "Year-end discounting; mid-year convention is off.",
     }
@@ -236,9 +289,36 @@ def default_assumptions(cleaned_income, cleaned_balance, cleaned_cashflow, marke
     if assumptions["debt"] is None:
         assumptions["debt"] = 0.0
         sources["debt"] = "No reported debt; assumed $0 million."
-    if assumptions["cash"] is None:
-        assumptions["cash"] = 0.0
-        sources["cash"] = "No reported cash; assumed $0 million."
+    cash_source = (
+        "Cash component uses the combined cash-and-short-term-investments total "
+        "because a separate cash balance was unavailable."
+        if cash_uses_combined_total
+        else "Most recent reported cash and cash equivalents, in USD millions."
+    )
+    sources["reported_cash"] = cash_source
+    sources["short_term_securities"] = (
+        "Derived as the combined cash-and-short-term-investments total less cash, "
+        "in USD millions."
+        if short_term_securities_derived
+        else (
+            "Short-term investments included separately from cash, in USD millions."
+            if not cash_uses_combined_total
+            else "Included in the combined cash-and-short-term-investments total above."
+        )
+    )
+    sources["long_term_securities"] = (
+        "Most recent reported long-term investments / securities, in USD millions."
+    )
+    if not securities_included:
+        sources["include_securities"] = (
+            "False; short- and long-term securities are excluded from cash."
+        )
+    sources["cash"] = (
+        f"Cash ${reported_cash:,.1f}M + short-term securities "
+        f"${short_term_securities:,.1f}M + long-term securities "
+        f"${long_term_securities:,.1f}M"
+        + ("; securities included." if securities_included else "; securities excluded.")
+    )
 
     raw_shares = _number(market_data.get("diluted_shares_outstanding"))
     if raw_shares is None or raw_shares <= 0:

@@ -36,9 +36,20 @@ def _format_assumption(name, value):
         return f"{value:.2f}"
     if name == "diluted_shares":
         return f"{value:,.1f} million"
-    if name in {"base_revenue", "debt", "cash"}:
+    if name in {
+        "base_revenue",
+        "debt",
+        "cash",
+        "reported_cash",
+        "short_term_securities",
+        "long_term_securities",
+    }:
         return f"${value:,.1f} million"
     return str(value)
+
+
+def _format_currency(value):
+    return f"(${abs(value):,.1f})" if value < 0 else f"${value:,.1f}"
 
 
 def _display_assumptions(assumptions):
@@ -56,6 +67,10 @@ def _display_assumptions(assumptions):
         "exit_ebitda_multiple": "Exit EV / EBITDA",
         "debt": "Debt",
         "cash": "Cash",
+        "reported_cash": "Reported cash and cash equivalents",
+        "short_term_securities": "Short-term marketable securities",
+        "long_term_securities": "Long-term marketable securities",
+        "include_securities": "Include securities in cash",
         "diluted_shares": "Diluted shares",
         "mid_year": "Mid-year convention",
         "risk_free_rate": "Risk-free rate",
@@ -73,6 +88,10 @@ def _display_assumptions(assumptions):
         "pre_tax_cost_of_debt",
         "equity_weight",
         "debt_weight",
+        "reported_cash",
+        "short_term_securities",
+        "long_term_securities",
+        "include_securities",
     )
     assumptions_table = pd.DataFrame(
         [
@@ -150,7 +169,7 @@ def _display_valuation(assumptions, company_data):
         }
     ).set_index("Step")
     st.dataframe(
-        bridge.style.format({"USD millions": "${:,.1f}"}),
+        bridge.style.format({"USD millions": _format_currency}),
         alt="Bridge from enterprise value to equity value",
     )
 

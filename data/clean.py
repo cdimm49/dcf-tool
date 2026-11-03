@@ -35,8 +35,25 @@ _ROWS = {
     "balance": {
         "Cash": (
             "Cash And Cash Equivalents",
-            "Cash Cash Equivalents And Short Term Investments",
+            "Cash Equivalents",
+            "Cash Financial",
             "Cash",
+        ),
+        "Cash and short-term investments total": (
+            "Cash Cash Equivalents And Short Term Investments",
+            "Cash Cash Equivalents And Federal Funds Sold",
+        ),
+        "Short-term marketable securities": (
+            "Other Short Term Investments",
+            "Short Term Investments",
+            "Marketable Securities Current",
+        ),
+        "Long-term marketable securities": (
+            "Investments And Advances",
+            "Other Investments",
+            "Held To Maturity Securities",
+            "Trading Securities",
+            "Available For Sale Securities",
         ),
         "Total Current Assets": ("Total Current Assets", "Current Assets"),
         "Total Assets": ("Total Assets",),
