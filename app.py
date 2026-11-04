@@ -4,6 +4,7 @@ from data.clean import add_income_margins, clean_statement
 from data.fetch import get_company_data
 from model.assumptions import DCF_INPUTS, default_assumptions
 from model.dcf import run_dcf
+from ui.sidebar import build_sidebar
 from ui.tables import display_statement
 
 
@@ -96,7 +97,11 @@ def _display_assumptions(assumptions):
     assumptions_table = pd.DataFrame(
         [
             {
-                "Input": labels[name],
+                "Input": (
+                    f"{labels[name]} (edited)"
+                    if name in assumptions.get("edited", set())
+                    else labels[name]
+                ),
                 "Value": _format_assumption(name, assumptions[name]),
                 "Source": assumptions["sources"][name],
             }
@@ -112,6 +117,18 @@ def _display_assumptions(assumptions):
 
 
 def _display_valuation(assumptions, company_data):
+    if (
+        assumptions["wacc"] is not None
+        and assumptions["terminal_growth"] is not None
+        and assumptions["terminal_growth"] >= assumptions["wacc"]
+    ):
+        st.error(
+            "Terminal growth must be below WACC. Lower terminal growth or increase "
+            "the discount rate."
+        )
+        _display_assumptions(assumptions)
+        return
+
     if assumptions["error"]:
         st.warning(
             f"A DCF could not be calculated: {assumptions['error']} "
@@ -135,6 +152,8 @@ def _display_valuation(assumptions, company_data):
     value_col.metric("Implied value per share", f"${result['value_per_share']:,.2f}")
     price_col.metric("Current share price", f"${current_price:,.2f}")
     upside_col.metric("Upside / downside", f"{upside:+.1f}%")
+
+    _display_sensitivity(assumptions)
 
     st.subheader("Five-year cash flow forecast")
     st.caption("Amounts are in USD millions; each year's cash flow is discounted to today.")
@@ -184,6 +203,97 @@ def _display_valuation(assumptions, company_data):
     _display_assumptions(assumptions)
 
 
+def _display_sensitivity(assumptions):
+    st.subheader("Sensitivity: value per share")
+    st.caption(
+        "Each cell shows how value changes when the discount rate and terminal "
+        "assumption move together."
+    )
+    wacc_values = [
+        assumptions["wacc"] + (step - 4) * 0.005 for step in range(9)
+    ]
+    base_inputs = {name: assumptions[name] for name in DCF_INPUTS}
+
+    if assumptions["terminal_method"] == "gordon":
+        terminal_values = [0.015 + step * 0.005 for step in range(5)]
+        column_labels = [f"{value:.1%}" for value in terminal_values]
+        row_labels = [f"{value:.2%}" for value in wacc_values]
+        rows = []
+        for discount_rate in wacc_values:
+            row = []
+            for terminal_growth in terminal_values:
+                if terminal_growth >= discount_rate:
+                    row.append(None)
+                    continue
+                inputs = {
+                    **base_inputs,
+                    "wacc": discount_rate,
+                    "terminal_growth": terminal_growth,
+                }
+                row.append(run_dcf(**inputs)["value_per_share"])
+            rows.append(row)
+        table = pd.DataFrame(rows, index=row_labels, columns=column_labels)
+        table.index.name = "WACC"
+        table.columns.name = "Terminal growth"
+        closest_column = min(
+            range(len(terminal_values)),
+            key=lambda index: abs(
+                terminal_values[index] - assumptions["terminal_growth"]
+            ),
+        )
+    else:
+        terminal_values = [
+            round(assumptions["exit_ebitda_multiple"] + offset, 8)
+            for offset in (-10, -5, 0, 5, 10)
+        ]
+        column_labels = [f"{value:.1f}x" for value in terminal_values]
+        row_labels = [f"{value:.2%}" for value in wacc_values]
+        rows = []
+        for discount_rate in wacc_values:
+            row = []
+            for multiple in terminal_values:
+                inputs = {
+                    **base_inputs,
+                    "wacc": discount_rate,
+                    "terminal_growth": min(
+                        assumptions["terminal_growth"], discount_rate - 0.000001
+                    ),
+                    "exit_ebitda_multiple": multiple,
+                }
+                row.append(run_dcf(**inputs)["value_per_share"])
+            rows.append(row)
+        table = pd.DataFrame(rows, index=row_labels, columns=column_labels)
+        table.index.name = "WACC"
+        table.columns.name = "Exit EV / EBITDA"
+        closest_column = min(
+            range(len(terminal_values)),
+            key=lambda index: abs(
+                terminal_values[index] - assumptions["exit_ebitda_multiple"]
+            ),
+        )
+
+    closest_row = min(
+        range(len(wacc_values)),
+        key=lambda index: abs(wacc_values[index] - assumptions["wacc"]),
+    )
+
+    def highlight_closest_cell(frame):
+        styles = pd.DataFrame("", index=frame.index, columns=frame.columns)
+        styles.iloc[closest_row, closest_column] = (
+            "background-color: #1f6feb; color: white; font-weight: bold;"
+        )
+        return styles
+
+    st.dataframe(
+        table.style.format(
+            lambda value: (
+                "—" if pd.isna(value) else f"${value:,.2f}"
+            )
+        ).apply(highlight_closest_cell, axis=None),
+        alt="Value per share across discount-rate and terminal-value assumptions",
+    )
+
+
 def forecast_columns(forecast):
     return [column for column in forecast.columns if column != "Discount Factor"]
 
@@ -191,57 +301,66 @@ st.set_page_config(layout="wide")
 st.title("DCF Tool")
 
 with st.form("ticker_form"):
-    ticker = st.text_input("Ticker symbol", value="AAPL")
+    ticker = st.text_input("Ticker symbol", value="AAPL", key="ticker_input")
     submitted = st.form_submit_button("Run")
 
 if submitted:
-    company_data = get_company_data(ticker)
-
-    if "error" in company_data:
-        st.error(company_data["error"])
+    requested_ticker = ticker.strip().upper()
+    fetched_data = get_company_data(requested_ticker)
+    if "error" in fetched_data:
+        st.session_state["ticker_error"] = fetched_data["error"]
     else:
-        st.subheader(company_data["company_name"])
-        st.metric("Current price", f"${company_data['current_price']:,.2f}")
-        if company_data["diluted_shares_outstanding"] is None:
-            st.warning("Diluted shares outstanding are unavailable.")
+        st.session_state["loaded_ticker"] = requested_ticker
+        st.session_state["loaded_company_data"] = fetched_data
+        st.session_state["ticker_error"] = None
 
-        income_statement = add_income_margins(
-            clean_statement(company_data["income_statement"], "income")
-        )
-        balance_sheet = clean_statement(
-            company_data["balance_sheet"], "balance"
-        )
-        cash_flow_statement = clean_statement(
-            company_data["cash_flow_statement"], "cashflow"
-        )
-        market_data = {
-            "current_price": company_data["current_price"],
-            "diluted_shares_outstanding": company_data[
-                "diluted_shares_outstanding"
-            ],
-            "diluted_shares_source": company_data["diluted_shares_source"],
-            "beta": company_data["beta"],
-            "risk_free_rate": company_data["risk_free_rate"],
-        }
-        assumptions = default_assumptions(
-            income_statement, balance_sheet, cash_flow_statement, market_data
-        )
+if st.session_state.get("ticker_error"):
+    st.error(st.session_state["ticker_error"])
 
-        valuation_tab, income_tab, balance_tab, cash_flow_tab = st.tabs(
-            ["Valuation", "Income statement", "Balance sheet", "Cash flow statement"]
-        )
+company_data = st.session_state.get("loaded_company_data")
+loaded_ticker = st.session_state.get("loaded_ticker")
+if company_data:
+    st.subheader(company_data["company_name"])
+    st.metric("Current price", f"${company_data['current_price']:,.2f}")
+    if company_data["diluted_shares_outstanding"] is None:
+        st.warning("Diluted shares outstanding are unavailable.")
 
-        with valuation_tab:
-            _display_valuation(assumptions, company_data)
+    income_statement = add_income_margins(
+        clean_statement(company_data["income_statement"], "income")
+    )
+    balance_sheet = clean_statement(company_data["balance_sheet"], "balance")
+    cash_flow_statement = clean_statement(
+        company_data["cash_flow_statement"], "cashflow"
+    )
+    market_data = {
+        "current_price": company_data["current_price"],
+        "diluted_shares_outstanding": company_data["diluted_shares_outstanding"],
+        "diluted_shares_source": company_data["diluted_shares_source"],
+        "beta": company_data["beta"],
+        "risk_free_rate": company_data["risk_free_rate"],
+    }
+    defaults = default_assumptions(
+        income_statement, balance_sheet, cash_flow_statement, market_data
+    )
+    assumptions = build_sidebar(loaded_ticker, defaults, company_data)
 
-        with income_tab:
-            display_statement(income_statement)
-            st.caption("USD millions, fiscal years")
+    valuation_tab, income_tab, balance_tab, cash_flow_tab = st.tabs(
+        ["Valuation", "Income statement", "Balance sheet", "Cash flow statement"]
+    )
 
-        with balance_tab:
-            display_statement(balance_sheet)
-            st.caption("USD millions, fiscal years")
+    with valuation_tab:
+        _display_valuation(assumptions, company_data)
 
-        with cash_flow_tab:
-            display_statement(cash_flow_statement)
-            st.caption("USD millions, fiscal years")
+    with income_tab:
+        display_statement(income_statement)
+        st.caption("USD millions, fiscal years")
+
+    with balance_tab:
+        display_statement(balance_sheet)
+        st.caption("USD millions, fiscal years")
+
+    with cash_flow_tab:
+        display_statement(cash_flow_statement)
+        st.caption("USD millions, fiscal years")
+else:
+    st.info("Enter a ticker and select Run to begin a valuation.")
