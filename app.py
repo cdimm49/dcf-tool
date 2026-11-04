@@ -5,6 +5,7 @@ import streamlit as st
 from data.clean import add_income_margins, clean_statement
 from data.fetch import get_company_data
 from data.news import get_recent_news
+from data.snapshots import available_snapshots, load_saved_news
 from model.assumptions import DCF_INPUTS, default_assumptions
 from model.dcf import run_dcf
 from model.multiples import calculate_multiples
@@ -76,8 +77,8 @@ def _is_financial_company(company_data):
     )
 
 
-def _friendly_ticker_error(error):
-    details = str(error).casefold()
+def _friendly_ticker_error(fetched_data, symbol):
+    details = str(fetched_data.get("error", "")).casefold()
     network_terms = (
         "currently down",
         "network",
@@ -91,10 +92,15 @@ def _friendly_ticker_error(error):
     )
     if any(term in details for term in network_terms):
         return "Yahoo Finance is temporarily unavailable. Please try again later."
-    return (
-        "We couldn't find complete data for that ticker. Check the symbol and "
-        "try again."
+
+    message = (
+        f"We couldn't load data for {symbol}. Check the symbol, or Yahoo Finance "
+        "may be limiting this server right now."
     )
+    saved = available_snapshots()
+    if saved:
+        message += f" Saved data is available for: {', '.join(saved)}."
+    return message
 
 
 def _relative_time(published):
@@ -120,20 +126,31 @@ def _relative_time(published):
 
 def _display_news(ticker):
     st.caption("Recent headlines for the selected company.")
+    articles, live_error = [], None
     try:
         with st.spinner("Fetching recent headlines..."):
             articles = get_recent_news(ticker)
     except Exception as error:
-        st.warning(
-            "We couldn't fetch headlines right now. Please try again later."
-        )
-        with st.expander("Details"):
-            st.code(str(error))
-        return
+        live_error = error
 
     if not articles:
-        st.info("No recent headlines were found for this ticker.")
-        return
+        saved_articles, saved_date = load_saved_news(ticker)
+        if saved_articles:
+            st.caption(
+                "Live headlines aren't available right now. Showing headlines "
+                f"saved on {saved_date}."
+            )
+            articles = saved_articles
+        elif live_error is not None:
+            st.warning(
+                "We couldn't fetch headlines right now. Please try again later."
+            )
+            with st.expander("Details"):
+                st.code(str(live_error))
+            return
+        else:
+            st.info("No recent headlines were found for this ticker.")
+            return
 
     for article in articles[:15]:
         st.link_button(article["title"], article["url"])
@@ -616,7 +633,7 @@ if submitted:
         fetched_data = get_company_data(requested_ticker)
         if "error" in fetched_data:
             st.session_state["ticker_error"] = _friendly_ticker_error(
-                fetched_data["error"]
+                fetched_data, requested_ticker
             )
             st.session_state.pop("loaded_ticker", None)
             st.session_state.pop("loaded_company_data", None)
@@ -636,6 +653,13 @@ loaded_ticker = st.session_state.get("loaded_ticker")
 if company_data:
     st.subheader(company_data["company_name"])
     st.metric("Current price", f"${company_data['current_price']:,.2f}")
+    if company_data.get("snapshot_date"):
+        st.info(
+            f"Showing data saved on {company_data['snapshot_date']}. Live Yahoo "
+            "Finance data isn't available from this server right now, so the "
+            "price and statements may be out of date. Run the app locally for "
+            "live data."
+        )
     if company_data["diluted_shares_outstanding"] is None:
         st.warning("Diluted shares outstanding are unavailable.")
     if _is_financial_company(company_data):

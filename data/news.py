@@ -84,9 +84,8 @@ def parse_news(items):
     )
 
 
-@st.cache_data(ttl=900)
-def get_recent_news(ticker):
-    """Fetch and normalize recent headlines for a ticker."""
+def fetch_news(ticker):
+    """Fetch and normalize recent headlines for a ticker (no caching)."""
     symbol = ticker.strip().upper() if isinstance(ticker, str) else ""
     if not symbol:
         return []
@@ -103,3 +102,9 @@ def get_recent_news(ticker):
             ) from ticker_error
 
     return parse_news(items)
+
+
+@st.cache_data(ttl=900)
+def get_recent_news(ticker):
+    """Cached headlines for the app. Failures raise, so they aren't cached."""
+    return fetch_news(ticker)

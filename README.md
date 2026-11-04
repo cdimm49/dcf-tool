@@ -2,7 +2,7 @@
 
 Type a stock ticker and get an automatically built discounted cash flow (DCF) valuation, with every assumption adjustable, a sensitivity grid, peer multiples, cleaned financial statements and recent news.
 
-**Live app:** _coming soon_
+**Live app:** [easy-dcf.streamlit.app](https://easy-dcf.streamlit.app)
 
 ![Valuation tab](screenshots/valuation.png)
 
@@ -112,6 +112,7 @@ Python · Streamlit · pandas · yfinance · pytest
 ## Limitations
 
 - Data comes from Yahoo Finance through yfinance, an unofficial source. It can be delayed, incomplete or temporarily unavailable, and Yahoo sometimes rate-limits requests.
+- Yahoo often blocks shared cloud servers, so the hosted demo falls back to saved snapshots (clearly dated in the app) for about 25 popular tickers. Run the app locally for live data on any ticker. `python scripts/make_snapshots.py` refreshes the snapshots.
 - Defaults are mechanical, derived from a few years of history. They're a starting point to question, not a forecast.
 - A standard DCF is a poor fit for banks, insurers and companies without positive operating profit.
 
