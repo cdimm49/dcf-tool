@@ -78,7 +78,16 @@ def _tax_rate(income):
     )
 
 
-def _revenue_growth_rates(income, terminal_growth):
+GROWTH_PROFILES = ("fade", "flat", "custom")
+FORECAST_YEARS = 5
+
+
+def historical_starting_growth(income):
+    """Historical revenue CAGR, capped at -5% to 20%, or None without enough data.
+
+    The cap keeps one unusual stretch (a pandemic dip, a huge acquisition) from
+    turning into a five-year forecast.
+    """
     revenues = _row_values(income, "Revenue").dropna()
     if len(revenues) < 2:
         return None
@@ -94,11 +103,35 @@ def _revenue_growth_rates(income, terminal_growth):
         return None
 
     cagr = (newest / oldest) ** (1 / periods) - 1
-    starting_growth = min(max(cagr, -0.05), 0.20)
+    return min(max(cagr, -0.05), 0.20)
+
+
+def growth_profile_rates(starting_growth, terminal_growth, profile="fade"):
+    """Five yearly revenue growth rates for a preset profile.
+
+    "fade": start at the historical rate and step evenly down (or up) to the
+        terminal growth rate by year 5, so the forecast hands off smoothly to
+        the terminal value. Growth usually slows as companies mature.
+    "flat": hold the historical rate for all five years.
+    "custom" has no preset rates (the user sets each year), so it returns None.
+    """
+    if profile not in GROWTH_PROFILES:
+        raise ValueError(f"Unknown growth profile: {profile!r}")
+    if profile == "custom" or starting_growth is None:
+        return None
+    if profile == "flat":
+        return [starting_growth] * FORECAST_YEARS
+    last_year = FORECAST_YEARS - 1
     return [
-        starting_growth + (terminal_growth - starting_growth) * year / 4
-        for year in range(5)
+        starting_growth + (terminal_growth - starting_growth) * year / last_year
+        for year in range(FORECAST_YEARS)
     ]
+
+
+def _revenue_growth_rates(income, terminal_growth):
+    return growth_profile_rates(
+        historical_starting_growth(income), terminal_growth, "fade"
+    )
 
 
 def _fiscal_year(label):
@@ -196,6 +229,8 @@ def default_assumptions(
     assumptions = {
         "base_revenue": _recent_value(cleaned_income, "Revenue"),
         "growth_rates": None,
+        "starting_growth": historical_starting_growth(cleaned_income),
+        "growth_profile": "fade",
         "ebit_margin": None,
         "tax_rate": None,
         "da_pct_revenue": None,

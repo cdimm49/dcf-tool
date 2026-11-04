@@ -9,7 +9,7 @@ Type a stock ticker and get an automatically built discounted cash flow (DCF) va
 ## Features
 
 - **Auto-built DCF.** Pulls a company's financials and market data, derives every assumption from its history, and outputs an implied value per share against the current price.
-- **Adjustable assumptions.** A sidebar slider or input for each variable in the model: revenue growth by year, margins, tax, reinvestment, each WACC component and the terminal value. The valuation updates instantly, and a reset button restores the defaults.
+- **Adjustable assumptions.** A sidebar slider or input for each variable in the model: revenue growth by year, margins, tax, reinvestment, each WACC component and the terminal value. A growth profile selector fills the five growth sliders with a preset: **Fade** (historical growth easing to terminal growth), **Flat** (historical growth held for five years) or **Custom** (set each year yourself). The valuation updates instantly, and a reset button restores the defaults.
 - **Sensitivity grid.** Value per share across WACC × terminal growth (or × exit multiple), with the current case highlighted.
 - **Multiples and peers.** P/E, EV/EBITDA, EV/Sales, P/B and FCF yield, compared with any peer tickers you enter, plus a cross-check of the DCF value against peer P/E.
 - **Clean financial statements.** Income statement, balance sheet and cash flow in USD millions, with margin and growth rows.
@@ -32,7 +32,7 @@ The model projects five years of unlevered free cash flow and discounts it at th
 
 | Input | How the default is derived |
 | --- | --- |
-| Revenue growth | Historical revenue CAGR, capped at −5% to 20%, fading linearly to terminal growth by year 5 |
+| Revenue growth | Historical revenue CAGR, capped at −5% to 20%, fading linearly to terminal growth by year 5 (the Fade profile; Flat holds the CAGR instead) |
 | EBIT margin, D&A %, CapEx % | 3-year averages as a share of revenue |
 | ΔNWC | Historical change in working capital ÷ change in revenue, clamped to 0–20%; 5% when the history is unstable |
 | Tax rate | 3-year effective rate, clamped to 10–30% |

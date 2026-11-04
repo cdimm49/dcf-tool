@@ -2,7 +2,10 @@ import math
 
 import streamlit as st
 
+from model.assumptions import GROWTH_PROFILES, growth_profile_rates
 from model.wacc import cost_of_equity, wacc
+
+GROWTH_PROFILE_LABELS = {"fade": "Fade", "flat": "Flat", "custom": "Custom"}
 
 
 def _initial_values(defaults):
@@ -15,6 +18,10 @@ def _initial_values(defaults):
             f"dcf_growth_{year}": float(rate) * 100
             for year, rate in enumerate(growth_rates, start=1)
         },
+        # Without a historical growth rate there is nothing to fade or hold flat.
+        "dcf_growth_profile": (
+            "fade" if defaults.get("starting_growth") is not None else "custom"
+        ),
         "dcf_ebit_margin": float(defaults.get("ebit_margin") or 0.0) * 100,
         "dcf_tax_rate": float(defaults.get("tax_rate") or 0.0) * 100,
         "dcf_da_pct_revenue": float(defaults.get("da_pct_revenue") or 0.0) * 100,
@@ -54,6 +61,52 @@ def _reset_controls(values):
         st.session_state[key] = value
 
 
+def _apply_growth_profile(starting_growth):
+    """Refill the five growth sliders from the selected preset (Custom leaves them)."""
+    rates = growth_profile_rates(
+        starting_growth,
+        st.session_state["dcf_terminal_growth"] / 100,
+        st.session_state["dcf_growth_profile"],
+    )
+    if rates is None:
+        return
+    for year, rate in enumerate(rates, start=1):
+        st.session_state[f"dcf_growth_{year}"] = rate * 100
+
+
+def _growth_slider_moved():
+    # A hand-set year no longer matches Fade or Flat, so label it honestly.
+    st.session_state["dcf_growth_profile"] = "custom"
+
+
+def _terminal_growth_moved(starting_growth):
+    # Fade ends at terminal growth, so keep year 5 matched to the new rate.
+    if st.session_state.get("dcf_growth_profile") == "fade":
+        _apply_growth_profile(starting_growth)
+
+
+def _growth_profile_caption(profile, starting_growth):
+    if starting_growth is None:
+        return "Historical revenue growth is unavailable, so set each year yourself."
+    start = f"{starting_growth:.1%}"
+    if profile == "fade":
+        terminal = st.session_state.get("dcf_terminal_growth", 0.0) / 100
+        if starting_growth > terminal:
+            return (
+                f"Starts at the historical growth rate ({start}) and steps down to "
+                "the terminal growth rate by year 5, since growth usually slows as "
+                "companies mature."
+            )
+        return (
+            f"Starts at the historical growth rate ({start}) and steps up to the "
+            "terminal growth rate by year 5, since recent growth has been below "
+            "the long-term rate."
+        )
+    if profile == "flat":
+        return f"Holds the historical growth rate ({start}) for all five years."
+    return "Set each year yourself. Choose Fade or Flat to refill the sliders."
+
+
 def _cash_for_securities_choice(included_cash, excluded_cash):
     if st.session_state["dcf_include_securities"]:
         st.session_state["dcf_cash"] = included_cash
@@ -65,7 +118,9 @@ def _slider_bounds(default, minimum, maximum):
     return float(min(minimum, default)), float(max(maximum, default))
 
 
-def _rate_slider(label, key, default, minimum, maximum, step=0.5):
+def _rate_slider(
+    label, key, default, minimum, maximum, step=0.5, on_change=None, args=None
+):
     default_percent = float(default or 0.0) * 100
     lower, upper = _slider_bounds(default_percent, minimum, maximum)
     return st.slider(
@@ -75,6 +130,8 @@ def _rate_slider(label, key, default, minimum, maximum, step=0.5):
         step=step,
         format="%.1f%%",
         key=key,
+        on_change=on_change,
+        args=args,
         persist_state="session",
     ) / 100
 
@@ -103,7 +160,20 @@ def build_sidebar(ticker, defaults, company_data):
         st.header("Valuation assumptions")
         st.caption("Adjust the starting estimates to see how value changes.")
 
+        starting_growth = defaults.get("starting_growth")
         with st.expander("Growth", expanded=True):
+            growth_profile = st.radio(
+                "Growth profile",
+                options=GROWTH_PROFILES,
+                format_func=GROWTH_PROFILE_LABELS.get,
+                horizontal=True,
+                key="dcf_growth_profile",
+                on_change=_apply_growth_profile,
+                args=(starting_growth,),
+                disabled=starting_growth is None,
+                persist_state="session",
+            )
+            st.caption(_growth_profile_caption(growth_profile, starting_growth))
             growth_rates = [
                 st.slider(
                     f"Year {year} revenue growth",
@@ -112,6 +182,7 @@ def build_sidebar(ticker, defaults, company_data):
                     step=0.5,
                     format="%.1f%%",
                     key=f"dcf_growth_{year}",
+                    on_change=_growth_slider_moved,
                     persist_state="session",
                 )
                 / 100
@@ -262,6 +333,8 @@ def build_sidebar(ticker, defaults, company_data):
                     defaults.get("terminal_growth"),
                     -5,
                     10,
+                    on_change=_terminal_growth_moved,
+                    args=(starting_growth,),
                 )
             else:
                 multiple_default = float(defaults.get("exit_ebitda_multiple") or 0.0)
@@ -410,6 +483,18 @@ def build_sidebar(ticker, defaults, company_data):
         assumptions["sources"][name] = (
             "Adjusted in the sidebar from the auto-derived starting value."
         )
+    assumptions["growth_profile"] = growth_profile
+    if "growth_rates" in assumptions["edited"]:
+        if growth_profile == "flat":
+            assumptions["sources"]["growth_rates"] = (
+                "Flat profile: historical revenue CAGR, capped at -5% to 20%, held "
+                "for all five years."
+            )
+        elif growth_profile == "fade":
+            assumptions["sources"]["growth_rates"] = (
+                "Fade profile: historical revenue CAGR, capped at -5% to 20%, fading "
+                "to the terminal growth set in the sidebar."
+            )
 
     if current_wacc is not None and terminal_growth is not None:
         if terminal_growth >= current_wacc:
