@@ -43,6 +43,22 @@ The model projects five years of unlevered free cash flow and discounts it at th
 
 The Valuation tab lists every assumption with its value and source, and marks any you've edited.
 
+## Data sources
+
+The app tries each source in order and labels what it used:
+
+1. **Yahoo Finance** (via yfinance): statements, price, beta and news. Used whenever it works, which is usually the case when running locally.
+2. **SEC EDGAR + Yahoo prices**: Yahoo blocks statement requests from shared cloud servers like Streamlit Cloud, but still serves price history. The app then reads annual statements from the SEC's free [XBRL API](https://www.sec.gov/search-filings/edgar-application-programming-interfaces) (`data/sec.py`), and estimates beta from five years of monthly returns against the S&P 500.
+3. **Saved snapshots**: real data saved for about 25 popular tickers (`data/snapshots/`), shown with the date it was saved if both live sources fail.
+
+The SEC asks API users to identify themselves, so the SEC step only runs when a `SEC_USER_AGENT` setting is present, such as `DCF Tool your.email@example.com`. On Streamlit Cloud it's set under **Settings → Secrets**:
+
+```toml
+SEC_USER_AGENT = "DCF Tool your.email@example.com"
+```
+
+`python scripts/check_sec.py` compares SEC-based numbers with Yahoo's for a set of tickers. `python scripts/make_snapshots.py` refreshes the snapshots.
+
 ## Verifying the math
 
 The DCF engine is pure Python with no data or UI code, so it can be tested on its own. The tests check it against a hand-built Excel model ([`docs/DCF_Answer_Key.xlsx`](docs/DCF_Answer_Key.xlsx)) using a simple test company. The engine has to match the spreadsheet to the cent:
@@ -72,6 +88,8 @@ data/
   fetch.py           Prices, statements, shares, Treasury yield (yfinance)
   clean.py           Standardizes line items into tidy USD-million tables
   news.py            Headlines with fallback sources
+  sec.py             Annual statements from SEC EDGAR filings
+  snapshots.py       Saved data for when live sources fail
 model/
   assumptions.py     Derives default assumptions from history
   wacc.py            CAPM and WACC
@@ -80,6 +98,7 @@ model/
 ui/
   sidebar.py         Assumption controls
   tables.py          Table formatting
+scripts/             Snapshot refresh and SEC-vs-Yahoo check
 tests/               pytest suite
 docs/                Excel answer key
 ```
@@ -112,7 +131,7 @@ Python · Streamlit · pandas · yfinance · pytest
 ## Limitations
 
 - Data comes from Yahoo Finance through yfinance, an unofficial source. It can be delayed, incomplete or temporarily unavailable, and Yahoo sometimes rate-limits requests.
-- Yahoo often blocks shared cloud servers, so the hosted demo falls back to saved snapshots (clearly dated in the app) for about 25 popular tickers. Run the app locally for live data on any ticker. `python scripts/make_snapshots.py` refreshes the snapshots.
+- On the hosted app, statements come from SEC 10-K filings, so live data covers US-listed companies. SEC line items are mapped to Yahoo's layout and can differ slightly, for example in how leases count toward debt.
 - Defaults are mechanical, derived from a few years of history. They're a starting point to question, not a forecast.
 - A standard DCF is a poor fit for banks, insurers and companies without positive operating profit.
 

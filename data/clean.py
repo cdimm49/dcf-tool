@@ -17,7 +17,10 @@ _ROWS = {
             "Operating Expenses",
             "Total Operating Expenses",
         ),
-        "EBIT": ("EBIT", "Operating Income"),
+        # Prefer operating income: Yahoo's "EBIT" row is pretax income plus interest,
+        # which includes non-operating income (interest on cash, equity stakes)
+        # that the equity bridge already counts by adding cash and investments.
+        "EBIT": ("Operating Income", "EBIT"),
         "EBITDA": ("EBITDA",),
         "Interest Expense": (
             "Interest Expense",

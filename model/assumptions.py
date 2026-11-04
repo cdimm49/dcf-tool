@@ -345,7 +345,7 @@ def default_assumptions(
         beta = 1.0
         beta_source = "Assumed beta of 1.0; yfinance beta was unavailable."
     else:
-        beta_source = "Beta reported by yfinance."
+        beta_source = market_data.get("beta_source") or "Beta reported by yfinance."
     equity_cost = cost_of_equity(risk_free_rate, beta, 0.05)
 
     interest_period = _row_values(cleaned_income, "Interest Expense")

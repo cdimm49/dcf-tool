@@ -18,6 +18,10 @@ def saved_snapshot(tmp_path, monkeypatch):
     monkeypatch.setattr(snapshots, "SNAPSHOT_DIR", tmp_path)
     monkeypatch.setattr(fetch, "_live_blocked_until", 0.0)
     monkeypatch.delenv("DCF_FORCE_SNAPSHOT", raising=False)
+    monkeypatch.delenv("DCF_SKIP_YAHOO", raising=False)
+    # No SEC access unless a test turns it on (and never a real request).
+    monkeypatch.setattr(fetch, "_sec_user_agent", lambda: None)
+    monkeypatch.setattr(fetch, "_cached_sec", _LiveStub(error=AssertionError("SEC called")))
     snapshots.save_snapshot(
         "AAPL",
         {
@@ -95,3 +99,66 @@ def test_force_snapshot_env_var_skips_live(saved_snapshot, monkeypatch):
 def test_blank_ticker_returns_error(saved_snapshot):
     assert "error" in fetch.get_company_data("   ")
     assert "error" in fetch.get_company_data(None)
+
+
+SEC_DATA = {"company_name": "SEC Corp", "current_price": 50.0, "data_source": "sec"}
+
+
+def test_sec_is_used_when_yahoo_fails_and_then_yahoo_is_skipped(saved_snapshot, monkeypatch):
+    yahoo = _LiveStub(error=fetch.LiveDataError("Invalid Crumb"))
+    sec_stub = _LiveStub(result=SEC_DATA)
+    monkeypatch.setattr(fetch, "_cached_live", yahoo)
+    monkeypatch.setattr(fetch, "_cached_sec", sec_stub)
+    monkeypatch.setattr(fetch, "_sec_user_agent", lambda: "DCF Tool test@example.com")
+
+    assert fetch.get_company_data("MSFT") == SEC_DATA  # no snapshot needed
+    assert fetch.get_company_data("NVDA") == SEC_DATA
+    assert yahoo.calls == 1  # blocked after the first confirmed failure
+    assert sec_stub.calls == 2
+
+
+def test_sec_failure_falls_through_to_snapshot(saved_snapshot, monkeypatch):
+    monkeypatch.setattr(fetch, "_cached_live", _LiveStub(error=RuntimeError("401")))
+    monkeypatch.setattr(fetch, "_cached_sec", _LiveStub(error=RuntimeError("SEC down")))
+    monkeypatch.setattr(fetch, "_sec_user_agent", lambda: "DCF Tool test@example.com")
+
+    assert fetch.get_company_data("AAPL")["company_name"] == "Saved Apple"
+
+
+def test_error_mentions_sec_when_ticker_is_unknown_everywhere(saved_snapshot, monkeypatch):
+    from data import sec
+
+    monkeypatch.setattr(fetch, "_cached_live", _LiveStub(error=fetch.LiveDataError("Missing: all")))
+    monkeypatch.setattr(
+        fetch, "_cached_sec", _LiveStub(error=sec.SecDataError("ZZZZ isn't in the SEC's list"))
+    )
+    monkeypatch.setattr(fetch, "_sec_user_agent", lambda: "DCF Tool test@example.com")
+
+    result = fetch.get_company_data("ZZZZ")
+    assert "isn't in the SEC's list" in result["error"]
+    assert fetch._live_blocked_until == 0.0  # an unknown symbol doesn't block Yahoo
+
+
+def test_skip_yahoo_switch_goes_straight_to_sec(saved_snapshot, monkeypatch):
+    yahoo = _LiveStub(result=LIVE)
+    monkeypatch.setattr(fetch, "_cached_live", yahoo)
+    monkeypatch.setattr(fetch, "_cached_sec", _LiveStub(result=SEC_DATA))
+    monkeypatch.setattr(fetch, "_sec_user_agent", lambda: "DCF Tool test@example.com")
+    monkeypatch.setenv("DCF_SKIP_YAHOO", "1")
+
+    assert fetch.get_company_data("MSFT") == SEC_DATA
+    assert yahoo.calls == 0
+
+
+def test_estimate_beta_recovers_a_known_beta():
+    import numpy as np
+
+    rng = np.random.default_rng(0)
+    market_returns = rng.normal(0.01, 0.04, 60)
+    stock_returns = 1.5 * market_returns  # beta exactly 1.5
+    months = pd.period_range("2021-01", periods=61, freq="M")
+    market = pd.Series(100 * np.cumprod(np.r_[1, 1 + market_returns]), index=months)
+    stock = pd.Series(50 * np.cumprod(np.r_[1, 1 + stock_returns]), index=months)
+
+    assert fetch.estimate_beta(stock, market) == 1.5
+    assert fetch.estimate_beta(stock[:10], market[:10]) is None  # too little history

@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 import pandas as pd
 import streamlit as st
 from data.clean import add_income_margins, clean_statement
-from data.fetch import get_company_data
+from data.fetch import SEC_SOURCE_NOTE, get_company_data
 from data.news import get_recent_news
 from data.snapshots import available_snapshots, load_saved_news
 from model.assumptions import DCF_INPUTS, default_assumptions
@@ -90,6 +90,14 @@ def _friendly_ticker_error(fetched_data, symbol):
         "curl",
         "service unavailable",
     )
+    saved = available_snapshots()
+    saved_note = f" Saved data is available for: {', '.join(saved)}." if saved else ""
+    if "isn't in the sec's list" in details:
+        return (
+            f"We couldn't find {symbol}. Check the symbol. This site reads "
+            "statements from SEC filings, so it supports US-listed companies."
+            + saved_note
+        )
     if any(term in details for term in network_terms):
         return "Yahoo Finance is temporarily unavailable. Please try again later."
 
@@ -97,10 +105,7 @@ def _friendly_ticker_error(fetched_data, symbol):
         f"We couldn't load data for {symbol}. Check the symbol, or Yahoo Finance "
         "may be limiting this server right now."
     )
-    saved = available_snapshots()
-    if saved:
-        message += f" Saved data is available for: {', '.join(saved)}."
-    return message
+    return message + saved_note
 
 
 def _relative_time(published):
@@ -653,6 +658,8 @@ loaded_ticker = st.session_state.get("loaded_ticker")
 if company_data:
     st.subheader(company_data["company_name"])
     st.metric("Current price", f"${company_data['current_price']:,.2f}")
+    if company_data.get("data_source") == "sec":
+        st.caption(SEC_SOURCE_NOTE)
     if company_data.get("snapshot_date"):
         st.info(
             f"Showing data saved on {company_data['snapshot_date']}. Live Yahoo "
@@ -680,6 +687,7 @@ if company_data:
         "diluted_shares_outstanding": company_data["diluted_shares_outstanding"],
         "diluted_shares_source": company_data["diluted_shares_source"],
         "beta": company_data["beta"],
+        "beta_source": company_data.get("beta_source"),
         "risk_free_rate": company_data["risk_free_rate"],
     }
     defaults = default_assumptions(
