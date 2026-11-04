@@ -90,4 +90,16 @@ def get_recent_news(ticker):
     symbol = ticker.strip().upper() if isinstance(ticker, str) else ""
     if not symbol:
         return []
-    return parse_news(yf.Ticker(symbol).news)
+
+    try:
+        items = yf.Search(symbol, news_count=15).news
+    except Exception as search_error:
+        try:
+            items = yf.Ticker(symbol).news
+        except Exception as ticker_error:
+            raise RuntimeError(
+                "Could not fetch news from Yahoo Finance. "
+                f"Search error: {search_error}; Ticker error: {ticker_error}"
+            ) from ticker_error
+
+    return parse_news(items)

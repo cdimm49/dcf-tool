@@ -123,10 +123,12 @@ def _display_news(ticker):
     try:
         with st.spinner("Fetching recent headlines..."):
             articles = get_recent_news(ticker)
-    except Exception:
+    except Exception as error:
         st.warning(
             "We couldn't fetch headlines right now. Please try again later."
         )
+        with st.expander("Details"):
+            st.code(str(error))
         return
 
     if not articles:
