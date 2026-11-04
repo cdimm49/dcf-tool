@@ -4,6 +4,7 @@ from data.clean import add_income_margins, clean_statement
 from data.fetch import get_company_data
 from model.assumptions import DCF_INPUTS, default_assumptions
 from model.dcf import run_dcf
+from model.multiples import calculate_multiples
 from ui.sidebar import build_sidebar
 from ui.tables import display_statement
 
@@ -51,6 +52,51 @@ def _format_assumption(name, value):
 
 def _format_currency(value):
     return f"(${abs(value):,.1f})" if value < 0 else f"${value:,.1f}"
+
+
+def _format_multiple(metric, value):
+    if pd.isna(value):
+        return "—"
+    if metric == "FCF yield":
+        return f"{value:.1%}"
+    return f"{value:.1f}x"
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _cached_company_multiples(ticker, include_securities):
+    """Fetch and calculate a company's multiples once per ticker and cash setting."""
+    company_data = get_company_data(ticker)
+    if "error" in company_data:
+        return {"error": company_data["error"]}
+
+    try:
+        income_statement = clean_statement(
+            company_data["income_statement"], "income"
+        )
+        balance_sheet = clean_statement(company_data["balance_sheet"], "balance")
+        cash_flow_statement = clean_statement(
+            company_data["cash_flow_statement"], "cashflow"
+        )
+        multiples = calculate_multiples(
+            income_statement,
+            balance_sheet,
+            cash_flow_statement,
+            {
+                "current_price": company_data["current_price"],
+                "diluted_shares_outstanding": company_data[
+                    "diluted_shares_outstanding"
+                ],
+            },
+            include_securities=include_securities,
+        )
+    except Exception as error:
+        return {"error": f"Could not calculate multiples for {ticker}: {error}"}
+
+    return {
+        "company_name": company_data["company_name"],
+        "current_price": company_data["current_price"],
+        "multiples": multiples,
+    }
 
 
 def _display_assumptions(assumptions):
@@ -127,7 +173,7 @@ def _display_valuation(assumptions, company_data):
             "the discount rate."
         )
         _display_assumptions(assumptions)
-        return
+        return None
 
     if assumptions["error"]:
         st.warning(
@@ -135,7 +181,7 @@ def _display_valuation(assumptions, company_data):
             "A DCF may not fit this company type or the available data."
         )
         _display_assumptions(assumptions)
-        return
+        return None
 
     result = run_dcf(
         **{name: assumptions[name] for name in DCF_INPUTS}
@@ -201,6 +247,177 @@ def _display_valuation(assumptions, company_data):
         )
 
     _display_assumptions(assumptions)
+    return result
+
+
+def _display_multiples(
+    ticker, company_data, assumptions, valuation_result
+):
+    st.caption(
+        "Multiples compare a company's price or total business value with its "
+        "reported earnings, sales, assets, or cash flow."
+    )
+    include_securities = assumptions["include_securities"]
+    selected = _cached_company_multiples(ticker, include_securities)
+    if "error" in selected:
+        st.error(selected["error"])
+        return
+
+    descriptions = {
+        "P/E": "Share price for each dollar of the latest diluted EPS.",
+        "EV/EBITDA": "Business value for each dollar of the latest EBITDA.",
+        "EV/Sales": "Business value for each dollar of the latest sales.",
+        "P/B": "Market value for each dollar of shareholders’ equity.",
+        "FCF yield": "Free cash flow as a share of market value.",
+    }
+    st.subheader("Selected company")
+    selected_table = pd.DataFrame(
+        [
+            {
+                "Multiple": metric,
+                "Value": _format_multiple(metric, selected["multiples"][metric]),
+                "What it means": descriptions[metric],
+            }
+            for metric in descriptions
+        ]
+    )
+    st.dataframe(
+        selected_table,
+        hide_index=True,
+        alt="Selected company valuation multiples and plain-language descriptions",
+    )
+
+    peer_median_pe = float("nan")
+    with st.form("multiples_peer_form"):
+        peer_input = st.text_input(
+            "Peer tickers",
+            placeholder="MSFT, GOOGL, AMZN",
+            help="Enter 3 to 5 comma-separated ticker symbols.",
+        )
+        compare_peers = st.form_submit_button("Compare peers")
+
+    if compare_peers:
+        peer_tickers = [
+            peer.strip().upper() for peer in peer_input.split(",") if peer.strip()
+        ]
+        if not 3 <= len(peer_tickers) <= 5:
+            st.session_state["multiples_peer_error"] = (
+                "Enter 3 to 5 comma-separated peer tickers."
+            )
+            st.session_state.pop("multiples_peer_tickers", None)
+        elif len(set(peer_tickers)) != len(peer_tickers):
+            st.session_state["multiples_peer_error"] = (
+                "Each peer ticker must be unique."
+            )
+            st.session_state.pop("multiples_peer_tickers", None)
+        elif ticker.upper() in peer_tickers:
+            st.session_state["multiples_peer_error"] = (
+                "The selected company is already shown; enter different peer tickers."
+            )
+            st.session_state.pop("multiples_peer_tickers", None)
+        else:
+            st.session_state["multiples_peer_error"] = None
+            st.session_state["multiples_peer_tickers"] = peer_tickers
+
+    if st.session_state.get("multiples_peer_error"):
+        st.warning(st.session_state["multiples_peer_error"])
+
+    peer_tickers = st.session_state.get("multiples_peer_tickers", [])
+    peer_values = []
+    if peer_tickers:
+        rows = [
+            {
+                "Company": f"{selected['company_name']} ({ticker.upper()})",
+                **selected["multiples"],
+            }
+        ]
+        for peer_ticker in peer_tickers:
+            peer = _cached_company_multiples(peer_ticker, include_securities)
+            if "error" in peer:
+                st.warning(f"{peer_ticker}: {peer['error']}")
+                peer_values.append({metric: float("nan") for metric in descriptions})
+                rows.append(
+                    {
+                        "Company": peer_ticker,
+                        **peer_values[-1],
+                    }
+                )
+            else:
+                peer_values.append(peer["multiples"])
+                rows.append(
+                    {
+                        "Company": f"{peer['company_name']} ({peer_ticker})",
+                        **peer["multiples"],
+                    }
+                )
+
+        peer_frame = pd.DataFrame(peer_values)
+        peer_median = peer_frame.median(numeric_only=True)
+        peer_median_pe = peer_median.get("P/E", float("nan"))
+        rows.append(
+            {
+                "Company": "Median (peers)",
+                **{
+                    metric: peer_median.get(metric, float("nan"))
+                    for metric in descriptions
+                },
+            }
+        )
+        formatted_rows = [
+            {
+                "Company": row["Company"],
+                **{
+                    metric: _format_multiple(metric, row[metric])
+                    for metric in descriptions
+                },
+            }
+            for row in rows
+        ]
+        st.subheader("Peer comparison")
+        st.dataframe(
+            pd.DataFrame(formatted_rows),
+            hide_index=True,
+            alt="Selected company and peer valuation multiples, including peer medians",
+        )
+
+    implied_pe = float("nan")
+    if (
+        valuation_result is not None
+        and valuation_result["value_per_share"] > 0
+        and company_data["current_price"] > 0
+        and not pd.isna(selected["multiples"]["P/E"])
+    ):
+        implied_pe = (
+            selected["multiples"]["P/E"]
+            * valuation_result["value_per_share"]
+            / company_data["current_price"]
+        )
+
+    with st.container(border=True):
+        st.markdown("**DCF cross-check**")
+        price_col, value_col = st.columns(2)
+        price_col.metric("Current price", f"${company_data['current_price']:,.2f}")
+        if valuation_result is None:
+            value_col.metric("DCF-implied value per share", "—")
+        else:
+            value_col.metric(
+                "DCF-implied value per share",
+                f"${valuation_result['value_per_share']:,.2f}",
+            )
+        st.write(f"Implied P/E at the DCF value: {_format_multiple('P/E', implied_pe)}")
+        if pd.isna(implied_pe) or pd.isna(peer_median_pe):
+            st.caption(
+                "A comparison is unavailable until both the DCF-implied P/E and "
+                "the peer median P/E are available."
+            )
+        else:
+            st.caption(f"Peer median P/E: {_format_multiple('P/E', peer_median_pe)}")
+            if implied_pe > peer_median_pe:
+                st.caption("The DCF-implied P/E is above the peer median P/E.")
+            elif implied_pe < peer_median_pe:
+                st.caption("The DCF-implied P/E is below the peer median P/E.")
+            else:
+                st.caption("The DCF-implied P/E is equal to the peer median P/E.")
 
 
 def _display_sensitivity(assumptions):
@@ -310,6 +527,9 @@ if submitted:
     if "error" in fetched_data:
         st.session_state["ticker_error"] = fetched_data["error"]
     else:
+        if st.session_state.get("loaded_ticker") != requested_ticker:
+            st.session_state.pop("multiples_peer_tickers", None)
+            st.session_state.pop("multiples_peer_error", None)
         st.session_state["loaded_ticker"] = requested_ticker
         st.session_state["loaded_company_data"] = fetched_data
         st.session_state["ticker_error"] = None
@@ -344,12 +564,23 @@ if company_data:
     )
     assumptions = build_sidebar(loaded_ticker, defaults, company_data)
 
-    valuation_tab, income_tab, balance_tab, cash_flow_tab = st.tabs(
-        ["Valuation", "Income statement", "Balance sheet", "Cash flow statement"]
+    valuation_tab, multiples_tab, income_tab, balance_tab, cash_flow_tab = st.tabs(
+        [
+            "Valuation",
+            "Multiples",
+            "Income statement",
+            "Balance sheet",
+            "Cash flow statement",
+        ]
     )
 
     with valuation_tab:
-        _display_valuation(assumptions, company_data)
+        valuation_result = _display_valuation(assumptions, company_data)
+
+    with multiples_tab:
+        _display_multiples(
+            loaded_ticker, company_data, assumptions, valuation_result
+        )
 
     with income_tab:
         display_statement(income_statement)
