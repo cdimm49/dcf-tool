@@ -599,7 +599,7 @@ def _display_sensitivity(assumptions):
 def forecast_columns(forecast):
     return [column for column in forecast.columns if column != "Discount Factor"]
 
-st.set_page_config(layout="wide")
+st.set_page_config(page_title="DCF Valuation Tool", page_icon="📈", layout="wide")
 st.title("DCF Tool")
 
 with st.form("ticker_form"):

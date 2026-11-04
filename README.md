@@ -1,71 +1,124 @@
-# DCF Tool
+# DCF Valuation Tool
 
-DCF Tool is an educational Streamlit app for exploring a company's estimated
-value using discounted cash flow (DCF). It loads financial statements and
-market data from Yahoo Finance through yfinance, then lets you adjust the
-assumptions and compare the result with a market price.
+Type a stock ticker and get an automatically built discounted cash flow (DCF) valuation, with every assumption adjustable, a sensitivity grid, peer multiples, cleaned financial statements and recent news.
 
-## Tabs
+**Live app:** _coming soon_
 
-The app has the five original valuation and financial-statement tabs, plus the
-new **News** tab:
+![Valuation tab](screenshots/valuation.png)
 
-- **Valuation** — estimated value per share, cash flow forecast, and sensitivity
-  to the discount rate and terminal assumption.
-- **Multiples** — selected valuation multiples and an optional comparison with
-  three to five peer companies.
-- **Income statement** — cleaned historical income statement and margins.
-- **Balance sheet** — cleaned historical balance sheet.
-- **Cash flow statement** — cleaned historical cash flow statement.
-- **News** — up to 15 recent company headlines with their source, publication
-  time, and summary when available.
+## Features
 
-## Install and run
+- **Auto-built DCF.** Pulls a company's financials and market data, derives every assumption from its history, and outputs an implied value per share against the current price.
+- **Adjustable assumptions.** A sidebar slider or input for each variable in the model: revenue growth by year, margins, tax, reinvestment, each WACC component and the terminal value. The valuation updates instantly, and a reset button restores the defaults.
+- **Sensitivity grid.** Value per share across WACC × terminal growth (or × exit multiple), with the current case highlighted.
+- **Multiples and peers.** P/E, EV/EBITDA, EV/Sales, P/B and FCF yield, compared with any peer tickers you enter, plus a cross-check of the DCF value against peer P/E.
+- **Clean financial statements.** Income statement, balance sheet and cash flow in USD millions, with margin and growth rows.
+- **News.** Recent headlines for the ticker with source and time.
+- **Guardrails.** Friendly errors for bad tickers, and a warning for banks and insurers, where a standard DCF doesn't fit.
 
-Use Python 3.10 or newer. From the project folder, create and activate a virtual
-environment:
+## How the valuation works
+
+The model projects five years of unlevered free cash flow and discounts it at the weighted average cost of capital.
+
+| Step | Formula |
+| --- | --- |
+| Free cash flow | FCFF = EBIT × (1 − tax) + D&A − CapEx − ΔNWC |
+| Cost of equity | CAPM: risk-free rate + beta × equity risk premium |
+| WACC | E/(D+E) × cost of equity + D/(D+E) × cost of debt × (1 − tax) |
+| Terminal value | Gordon growth: FCFF₅ × (1 + g) / (WACC − g), or exit multiple: EBITDA₅ × multiple |
+| Equity value | Enterprise value − debt + cash and marketable securities |
+
+### Default assumptions
+
+| Input | How the default is derived |
+| --- | --- |
+| Revenue growth | Historical revenue CAGR, capped at −5% to 20%, fading linearly to terminal growth by year 5 |
+| EBIT margin, D&A %, CapEx % | 3-year averages as a share of revenue |
+| ΔNWC | Historical change in working capital ÷ change in revenue, clamped to 0–20%; 5% when the history is unstable |
+| Tax rate | 3-year effective rate, clamped to 10–30% |
+| Risk-free rate | Current 10-year U.S. Treasury yield |
+| Beta / equity risk premium | Beta from Yahoo Finance / 5.0% |
+| Cost of debt | Interest expense ÷ total debt; falls back to risk-free + 1.5% |
+| Terminal growth / exit multiple | 2.5% / current EV/EBITDA |
+
+The Valuation tab lists every assumption with its value and source, and marks any you've edited.
+
+## Verifying the math
+
+The DCF engine is pure Python with no data or UI code, so it can be tested on its own. The tests check it against a hand-built Excel model ([`docs/DCF_Answer_Key.xlsx`](docs/DCF_Answer_Key.xlsx)) using a simple test company. The engine has to match the spreadsheet to the cent:
+
+| Output | Expected |
+| --- | --- |
+| WACC | 8.80% |
+| Enterprise value (Gordon) | 4,705.16 |
+| Value per share (Gordon) | $46.05 |
+| Value per share (10× exit multiple) | $41.40 |
+
+Other tests cover the assumption clamps and unit conversions, the multiples, the news parser (using a saved real response), terminal growth ≥ WACC raising an error, and the mid-year convention.
+
+## Screenshots
+
+| Assumptions sidebar | Multiples and peers |
+| --- | --- |
+| ![Sidebar](screenshots/sidebar.png) | ![Multiples](screenshots/multiples.png) |
+
+![News tab](screenshots/news.png)
+
+## Project structure
+
+```
+app.py               Streamlit entry point: layout and tabs
+data/
+  fetch.py           Prices, statements, shares, Treasury yield (yfinance)
+  clean.py           Standardizes line items into tidy USD-million tables
+  news.py            Headlines with fallback sources
+model/
+  assumptions.py     Derives default assumptions from history
+  wacc.py            CAPM and WACC
+  dcf.py             Projections, FCFF, terminal value, value per share
+  multiples.py       Valuation multiples
+ui/
+  sidebar.py         Assumption controls
+  tables.py          Table formatting
+tests/               pytest suite
+docs/                Excel answer key
+```
+
+## Run it locally
+
+Requires Python 3.12 or newer.
 
 ```powershell
-py -m venv .venv
-.\.venv\Scripts\Activate.ps1
-```
-
-On macOS or Linux, activate it with:
-
-```bash
-source .venv/bin/activate
-```
-
-Install the packages and start the app:
-
-```bash
+git clone https://github.com/cdimm49/dcf-tool.git
+cd dcf-tool
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1      # macOS/Linux: source .venv/bin/activate
 pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## Run tests
+If PowerShell blocks the activate script, run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once.
 
-With the virtual environment active, run:
+Run the tests:
 
 ```bash
-pytest
+python -m pytest -v
 ```
 
-## Main assumptions and limitations
+## Tech stack
 
-- The model projects five years of free cash flow to the firm.
-- The terminal value uses either the Gordon growth method or an exit EV/EBITDA
-  multiple.
-- The discount rate and operating assumptions are estimates. The sidebar lets
-  you review and adjust them; the assumptions table shows their sources.
-- Financial statements and market data come from Yahoo Finance via yfinance.
-  They can be delayed, incomplete, or unavailable, and the news feed may have
-  no recent articles.
-- A standard DCF is generally a poor fit for banks and insurers because debt and
-  working capital are part of their operations.
-- This is an educational tool, not investment advice. It does not account for
-  every company-specific risk or replace independent research.
+Python · Streamlit · pandas · yfinance · pytest
 
-## Screenshots
+## Limitations
 
-_Screenshot placeholders: add app screenshots here._
+- Data comes from Yahoo Finance through yfinance, an unofficial source. It can be delayed, incomplete or temporarily unavailable, and Yahoo sometimes rate-limits requests.
+- Defaults are mechanical, derived from a few years of history. They're a starting point to question, not a forecast.
+- A standard DCF is a poor fit for banks, insurers and companies without positive operating profit.
+
+## How it was built
+
+Built in VS Code using GitHub Copilot and Claude as coding assistants. The financial logic was specified up front, and the core math was verified against an independently built spreadsheet before it was connected to live data.
+
+---
+
+_Educational project, not investment advice._
