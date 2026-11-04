@@ -45,10 +45,12 @@ def get_company_data(ticker):
         income_statement = company.income_stmt
         balance_sheet = company.balance_sheet
         cash_flow_statement = company.cashflow
+        info_error = None
         try:
             info = company.info or {}
-        except Exception:
+        except Exception as error:
             info = {}
+            info_error = error
 
         # Try each price source separately so an unavailable source can fall back.
         current_price = None
@@ -116,12 +118,13 @@ def get_company_data(ticker):
             missing_data.append("company name")
 
         if missing_data:
-            return {
-                "error": (
-                    f"Could not fetch complete data for {symbol}. "
-                    f"Missing: {', '.join(missing_data)}."
-                )
-            }
+            error_message = (
+                f"Could not fetch complete data for {symbol}. "
+                f"Missing: {', '.join(missing_data)}."
+            )
+            if info_error is not None:
+                error_message = f"{error_message} Details: {info_error}"
+            return {"error": error_message}
 
         return {
             "company_name": company_name,
@@ -132,6 +135,8 @@ def get_company_data(ticker):
             "diluted_shares_source": diluted_shares_source,
             "beta": info.get("beta"),
             "risk_free_rate": _get_risk_free_yield(),
+            "sector": info.get("sector"),
+            "industry": info.get("industry"),
             "income_statement": income_statement,
             "balance_sheet": balance_sheet,
             "cash_flow_statement": cash_flow_statement,

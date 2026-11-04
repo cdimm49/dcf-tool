@@ -1,7 +1,10 @@
+from datetime import datetime, timezone
+
 import pandas as pd
 import streamlit as st
 from data.clean import add_income_margins, clean_statement
 from data.fetch import get_company_data
+from data.news import get_recent_news
 from model.assumptions import DCF_INPUTS, default_assumptions
 from model.dcf import run_dcf
 from model.multiples import calculate_multiples
@@ -60,6 +63,86 @@ def _format_multiple(metric, value):
     if metric == "FCF yield":
         return f"{value:.1%}"
     return f"{value:.1f}x"
+
+
+def _is_financial_company(company_data):
+    sector = (company_data.get("sector") or "").casefold()
+    industry = (company_data.get("industry") or "").casefold()
+    return (
+        "financial" in sector
+        or "bank" in industry
+        or "insurance" in industry
+        or "insurer" in industry
+    )
+
+
+def _friendly_ticker_error(error):
+    details = str(error).casefold()
+    network_terms = (
+        "currently down",
+        "network",
+        "connection",
+        "timed out",
+        "timeout",
+        "rate limit",
+        "too many requests",
+        "curl",
+        "service unavailable",
+    )
+    if any(term in details for term in network_terms):
+        return "Yahoo Finance is temporarily unavailable. Please try again later."
+    return (
+        "We couldn't find complete data for that ticker. Check the symbol and "
+        "try again."
+    )
+
+
+def _relative_time(published):
+    if published is None:
+        return "Publication time unavailable"
+
+    now = datetime.now(timezone.utc)
+    seconds = int((now - published).total_seconds())
+    if abs(seconds) < 60:
+        return "just now" if seconds >= 0 else "in less than a minute"
+
+    is_future = seconds < 0
+    seconds = abs(seconds)
+    if seconds < 3600:
+        amount, unit = seconds // 60, "minute"
+    elif seconds < 86400:
+        amount, unit = seconds // 3600, "hour"
+    else:
+        amount, unit = seconds // 86400, "day"
+    label = f"{amount} {unit}{'' if amount == 1 else 's'}"
+    return f"in {label}" if is_future else f"{label} ago"
+
+
+def _display_news(ticker):
+    st.caption("Recent headlines for the selected company.")
+    try:
+        with st.spinner("Fetching recent headlines..."):
+            articles = get_recent_news(ticker)
+    except Exception:
+        st.warning(
+            "We couldn't fetch headlines right now. Please try again later."
+        )
+        return
+
+    if not articles:
+        st.info("No recent headlines were found for this ticker.")
+        return
+
+    for article in articles[:15]:
+        st.link_button(article["title"], article["url"])
+        st.caption(
+            f"{article['source']} · {_relative_time(article['published'])}"
+        )
+        if article["summary"]:
+            summary = article["summary"]
+            if len(summary) > 280:
+                summary = f"{summary[:277].rstrip()}..."
+            st.write(summary)
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -523,16 +606,25 @@ with st.form("ticker_form"):
 
 if submitted:
     requested_ticker = ticker.strip().upper()
-    fetched_data = get_company_data(requested_ticker)
-    if "error" in fetched_data:
-        st.session_state["ticker_error"] = fetched_data["error"]
+    if not requested_ticker:
+        st.session_state["ticker_error"] = "Enter a ticker symbol to get started."
+        st.session_state.pop("loaded_ticker", None)
+        st.session_state.pop("loaded_company_data", None)
     else:
-        if st.session_state.get("loaded_ticker") != requested_ticker:
-            st.session_state.pop("multiples_peer_tickers", None)
-            st.session_state.pop("multiples_peer_error", None)
-        st.session_state["loaded_ticker"] = requested_ticker
-        st.session_state["loaded_company_data"] = fetched_data
-        st.session_state["ticker_error"] = None
+        fetched_data = get_company_data(requested_ticker)
+        if "error" in fetched_data:
+            st.session_state["ticker_error"] = _friendly_ticker_error(
+                fetched_data["error"]
+            )
+            st.session_state.pop("loaded_ticker", None)
+            st.session_state.pop("loaded_company_data", None)
+        else:
+            if st.session_state.get("loaded_ticker") != requested_ticker:
+                st.session_state.pop("multiples_peer_tickers", None)
+                st.session_state.pop("multiples_peer_error", None)
+            st.session_state["loaded_ticker"] = requested_ticker
+            st.session_state["loaded_company_data"] = fetched_data
+            st.session_state["ticker_error"] = None
 
 if st.session_state.get("ticker_error"):
     st.error(st.session_state["ticker_error"])
@@ -544,6 +636,11 @@ if company_data:
     st.metric("Current price", f"${company_data['current_price']:,.2f}")
     if company_data["diluted_shares_outstanding"] is None:
         st.warning("Diluted shares outstanding are unavailable.")
+    if _is_financial_company(company_data):
+        st.warning(
+            "A standard DCF may not fit banks or insurers because debt and "
+            "working capital are part of their operations."
+        )
 
     income_statement = add_income_margins(
         clean_statement(company_data["income_statement"], "income")
@@ -564,14 +661,23 @@ if company_data:
     )
     assumptions = build_sidebar(loaded_ticker, defaults, company_data)
 
-    valuation_tab, multiples_tab, income_tab, balance_tab, cash_flow_tab = st.tabs(
+    (
+        valuation_tab,
+        multiples_tab,
+        income_tab,
+        balance_tab,
+        cash_flow_tab,
+        news_tab,
+    ) = st.tabs(
         [
             "Valuation",
             "Multiples",
             "Income statement",
             "Balance sheet",
             "Cash flow statement",
-        ]
+            "News",
+        ],
+        on_change="rerun",
     )
 
     with valuation_tab:
@@ -593,5 +699,14 @@ if company_data:
     with cash_flow_tab:
         display_statement(cash_flow_statement)
         st.caption("USD millions, fiscal years")
-else:
+
+    if news_tab.open:
+        with news_tab:
+            _display_news(loaded_ticker)
+elif not st.session_state.get("ticker_error"):
     st.info("Enter a ticker and select Run to begin a valuation.")
+
+st.caption(
+    "Educational tool, not investment advice. Data from Yahoo Finance via "
+    "yfinance and may be delayed or incomplete."
+)
