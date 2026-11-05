@@ -1,5 +1,7 @@
 from datetime import datetime, timezone
 
+import altair as alt
+import numpy as np
 import pandas as pd
 import streamlit as st
 from data.clean import add_income_margins, clean_statement
@@ -8,6 +10,7 @@ from data.news import get_recent_news
 from data.snapshots import available_snapshots, load_saved_news
 from model.assumptions import DCF_INPUTS, default_assumptions
 from model.dcf import run_dcf
+from model.monte_carlo import run_monte_carlo_dcf
 from model.multiples import calculate_multiples
 from ui.sidebar import build_sidebar
 from ui.tables import display_statement
@@ -632,6 +635,196 @@ def _display_sensitivity(assumptions):
     )
 
 
+def _display_monte_carlo(assumptions, company_data, valuation_result):
+    st.subheader("Monte Carlo: a range of values instead of one number")
+    st.caption(
+        "The DCF above gives one answer for one set of assumptions. This runs the "
+        "same model thousands of times, each time nudging revenue growth, EBIT "
+        "margin, WACC, and the terminal assumption at random around the sidebar "
+        "values, to show how wide the plausible range is."
+    )
+    if valuation_result is None:
+        st.info("Fix the issue shown on the Valuation tab to run the simulation.")
+        return
+
+    gordon = assumptions["terminal_method"] == "gordon"
+    sims_col, dist_col, seed_col = st.columns(3)
+    n_simulations = sims_col.selectbox(
+        "Simulations", [1_000, 5_000, 10_000, 25_000], index=2, format_func="{:,}".format
+    )
+    distribution = dist_col.radio("Distribution", ["Normal", "Triangular"], horizontal=True)
+    lock_seed = seed_col.checkbox(
+        "Lock random seed",
+        value=True,
+        help="Keep the same random draws between reruns so results only change "
+        "when you change an input.",
+    )
+
+    growth_col, margin_col, wacc_col, terminal_col = st.columns(4)
+    growth_std = growth_col.slider(
+        "Revenue growth std (pts)", 0.0, 10.0, 2.0, 0.25, format="%.2f%%"
+    )
+    margin_std = margin_col.slider(
+        "EBIT margin std (pts)", 0.0, 5.0, 1.5, 0.25, format="%.2f%%"
+    )
+    wacc_std = wacc_col.slider("WACC std (pts)", 0.0, 3.0, 0.75, 0.25, format="%.2f%%")
+    if gordon:
+        terminal_growth_std = terminal_col.slider(
+            "Terminal growth std (pts)", 0.0, 2.0, 0.5, 0.1, format="%.1f%%"
+        )
+        exit_multiple_std = 0.0
+    else:
+        exit_multiple_std = terminal_col.slider(
+            "Exit multiple std (x)", 0.0, 5.0, 1.5, 0.25, format="%.2fx"
+        )
+        terminal_growth_std = 0.0
+
+    current_price = company_data["current_price"]
+    simulation = run_monte_carlo_dcf(
+        {name: assumptions[name] for name in DCF_INPUTS},
+        n_simulations=n_simulations,
+        distribution=distribution.lower(),
+        growth_std=growth_std / 100,
+        ebit_margin_std=margin_std / 100,
+        wacc_std=wacc_std / 100,
+        terminal_growth_std=terminal_growth_std / 100,
+        exit_multiple_std=exit_multiple_std,
+        current_price=current_price,
+        seed=42 if lock_seed else None,
+    )
+    prices = simulation["simulated_share_prices"]
+    stats = simulation["summary_stats"]
+
+    median_col, mean_col, range_col, above_col = st.columns(4)
+    median_col.metric("Median value (P50)", f"${stats['p50']:,.2f}")
+    mean_col.metric("Mean value", f"${stats['mean']:,.2f}")
+    range_col.metric("80% range (P10–P90)", f"${stats['p10']:,.0f} – ${stats['p90']:,.0f}")
+    above_col.metric("Chance above current price", f"{stats['prob_above_market']:.0%}")
+    st.caption(
+        "Read the 80% range as: in 8 of 10 simulated outcomes, the value per share "
+        "landed between these two numbers. The median is the middle outcome; the "
+        "mean is pulled toward the long tail of high values."
+    )
+
+    # Bin with numpy so the chart stays small at any simulation count. The
+    # extreme 0.5% tails are left out of the bars so a few runaway terminal
+    # values don't squash the rest of the histogram.
+    low, high = np.percentile(prices, [0.5, 99.5])
+    counts, edges = np.histogram(prices, bins=60, range=(low, high))
+    bars = pd.DataFrame({"start": edges[:-1], "end": edges[1:], "share": counts / len(prices)})
+    markers = pd.DataFrame(
+        {
+            "Marker": ["Current price", "Base-case DCF", "P10", "P50", "P90"],
+            "Value": [
+                current_price,
+                valuation_result["value_per_share"],
+                stats["p10"],
+                stats["p50"],
+                stats["p90"],
+            ],
+        }
+    )
+    # Zoom the x-axis to the bars plus any marker within one chart-width of them.
+    # A marker much further away (a price far above every simulated value, say)
+    # would squash the histogram into hairlines, so it goes in a caption instead.
+    span = max(high - low, 1e-9)
+    nearby = markers["Value"].between(low - span, high + span)
+    shown = markers[nearby]
+    view_low = min(low, shown["Value"].min())
+    view_high = max(high, shown["Value"].max())
+    padding = (view_high - view_low) * 0.03
+    x_scale = alt.Scale(
+        domain=[view_low - padding, view_high + padding], zero=False, nice=False
+    )
+    histogram = alt.Chart(bars).mark_bar(opacity=0.75).encode(
+        x=alt.X(
+            "start:Q",
+            title="Value per share (USD)",
+            scale=x_scale,
+            axis=alt.Axis(format="$,.0f"),
+        ),
+        x2="end:Q",
+        y=alt.Y("share:Q", title="Share of simulations", axis=alt.Axis(format=".0%")),
+        y2=alt.datum(0),  # anchor the bars at zero so they draw as columns
+        tooltip=[
+            alt.Tooltip("start:Q", title="From", format="$,.2f"),
+            alt.Tooltip("end:Q", title="To", format="$,.2f"),
+            alt.Tooltip("share:Q", title="Share", format=".1%"),
+        ],
+    )
+    rules = alt.Chart(shown).mark_rule(strokeWidth=2).encode(
+        x=alt.X("Value:Q", scale=x_scale),
+        color=alt.Color(
+            "Marker:N",
+            sort=list(markers["Marker"]),
+            scale=alt.Scale(domain=list(shown["Marker"])),
+            legend=alt.Legend(orient="bottom"),
+        ),
+        strokeDash=alt.condition(
+            alt.FieldOneOfPredicate("Marker", ["P10", "P50", "P90"]),
+            alt.value([4, 3]),
+            alt.value([1, 0]),
+        ),
+        tooltip=["Marker:N", alt.Tooltip("Value:Q", format="$,.2f")],
+    )
+    st.altair_chart(
+        histogram + rules,
+        width="stretch",
+        alt="Histogram of simulated values per share with price and percentile markers",
+    )
+    off_chart = markers[~nearby]
+    if not off_chart.empty:
+        side = lambda value: "right" if value > high else "left"
+        st.caption(
+            "Off the chart to keep the bars readable: "
+            + ", ".join(
+                f"{row.Marker} (${row.Value:,.2f}, to the {side(row.Value)})"
+                for row in off_chart.itertuples()
+            )
+            + "."
+        )
+    st.caption(
+        "Each bar is the share of simulations that landed in that price band. "
+        "The more of the histogram that sits right of the current-price line, the "
+        "more often the model says the stock is undervalued. The most extreme 1% "
+        "of outcomes are left off the chart but included in every statistic."
+    )
+
+    labels = ["P5", "P10", "P25", "P50", "P75", "P90", "P95"]
+    values = [stats[label.lower()] for label in labels]
+    percentile_table = pd.DataFrame(
+        {
+            "Value per share": values,
+            "Upside / downside": [(value / current_price - 1) * 100 for value in values],
+        },
+        index=pd.Index(labels, name="Percentile"),
+    )
+    st.dataframe(
+        percentile_table.style.format(
+            {"Value per share": "${:,.2f}", "Upside / downside": "{:+.1f}%"}
+        ),
+        alt="Simulated value per share at each percentile versus the current price",
+    )
+    st.caption(
+        "P25 means 25% of simulations came in at or below that value. Upside / "
+        "downside compares each value with the current share price."
+    )
+
+    if stats["pct_terminal_growth_clamped"] > 0.05:
+        st.caption(
+            f"{stats['pct_terminal_growth_clamped']:.0%} of draws had terminal growth "
+            "at or above WACC − 0.5%, so it was capped there to keep the Gordon "
+            "formula finite. Those draws sit in the high tail; consider a lower "
+            "terminal growth std."
+        )
+    if stats["prob_negative_equity"] > 0:
+        st.warning(
+            f"{stats['prob_negative_equity']:.1%} of simulations produced negative "
+            "equity value: in those outcomes net debt exceeds the business's "
+            "estimated enterprise value."
+        )
+
+
 def forecast_columns(forecast):
     return [column for column in forecast.columns if column != "Discount Factor"]
 
@@ -711,6 +904,7 @@ if company_data:
 
     (
         valuation_tab,
+        monte_carlo_tab,
         multiples_tab,
         income_tab,
         balance_tab,
@@ -719,6 +913,7 @@ if company_data:
     ) = st.tabs(
         [
             "Valuation",
+            "Monte Carlo",
             "Multiples",
             "Income statement",
             "Balance sheet",
@@ -730,6 +925,9 @@ if company_data:
 
     with valuation_tab:
         valuation_result = _display_valuation(assumptions, company_data)
+
+    with monte_carlo_tab:
+        _display_monte_carlo(assumptions, company_data, valuation_result)
 
     with multiples_tab:
         _display_multiples(
