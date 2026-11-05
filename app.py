@@ -890,6 +890,21 @@ _CATEGORY_LABELS = {
 }
 
 
+def _chart_text_color():
+    """Label color that's readable on the viewer's light or dark theme.
+
+    Altair draws text in black by default, which disappears on Streamlit's dark
+    background. Before the browser has reported its theme (the very first run),
+    a mid gray works on both.
+    """
+    theme_type = getattr(getattr(st.context, "theme", None), "type", None)
+    if theme_type == "dark":
+        return "#FAFAFA"
+    if theme_type == "light":
+        return "#31333F"
+    return "#8A8F98"
+
+
 def _display_football_field(
     ticker, company_data, assumptions, income_statement, valuation_result, simulation
 ):
@@ -920,7 +935,10 @@ def _display_football_field(
 
     price = company_data["current_price"]
     frame = pd.DataFrame(ranges)
+    # None (no mid, e.g. the 52-week range) becomes NaN so the table shows "—".
+    frame["mid"] = pd.to_numeric(frame["mid"], errors="coerce")
     frame["Category"] = frame["category"].map(_CATEGORY_LABELS)
+    text_color = _chart_text_color()
     view_low = min(frame["low"].min(), price)
     view_high = max(frame["high"].max(), price)
     # 10% each side leaves room for the $ labels drawn outside the bar ends.
@@ -957,10 +975,10 @@ def _display_football_field(
     mids = base.transform_filter("isValid(datum.mid)").mark_tick(
         color="black", thickness=2, size=22
     ).encode(x=alt.X("mid:Q", scale=x_scale))
-    low_labels = base.mark_text(align="right", dx=-4).encode(
+    low_labels = base.mark_text(align="right", dx=-4, color=text_color).encode(
         x=alt.X("low:Q", scale=x_scale), text=alt.Text("low:Q", format="$,.0f")
     )
-    high_labels = base.mark_text(align="left", dx=4).encode(
+    high_labels = base.mark_text(align="left", dx=4, color=text_color).encode(
         x=alt.X("high:Q", scale=x_scale), text=alt.Text("high:Q", format="$,.0f")
     )
     marker = alt.Chart(
@@ -976,6 +994,7 @@ def _display_football_field(
         baseline="top",
         dx=-4 if label_left else 4,
         y=0,
+        color=text_color,
     ).encode(
         x=alt.X("price:Q", scale=x_scale), text="label:N"
     )
