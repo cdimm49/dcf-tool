@@ -14,6 +14,7 @@ Type a stock ticker and get an automatically built discounted cash flow (DCF) va
 - **Adjustable assumptions.** A sidebar slider or input for each variable in the model: revenue growth by year, margins, tax, reinvestment, each WACC component and the terminal value. A growth profile selector fills the five growth sliders with a preset: **Fade** (historical growth easing to terminal growth), **Flat** (historical growth held for five years) or **Custom** (set each year yourself). The valuation updates instantly, and a reset button restores the defaults.
 - **Sensitivity grid.** Value per share across WACC × terminal growth (or × exit multiple), with the current case highlighted.
 - **Monte Carlo simulation.** Runs the DCF thousands of times, randomly varying revenue growth, EBIT margin, WACC and the terminal assumption around your sidebar values, and shows the spread of outcomes: a histogram of value per share marked with the current price, the base case and the P10, P50 and P90 values, a percentile table, and the chance the stock is worth more than its price.
+- **Football field.** One chart that lines up every method's value-per-share range against the current price: DCF with Gordon growth and with an exit multiple (each across WACC ±1 point and terminal growth ±0.5 point or exit multiple ±20%), the Monte Carlo P10–P90, peer P/E and EV/EBITDA (using the peers entered on the Multiples tab) and the 52-week trading range, with a table of each range and its gap to the price.
 - **Multiples and peers.** P/E, EV/EBITDA, EV/Sales, P/B and FCF yield, compared with any peer tickers you enter, plus a cross-check of the DCF value against peer P/E.
 - **Clean financial statements.** Income statement, balance sheet and cash flow in USD millions, with margin and growth rows.
 - **News.** Recent headlines for the ticker with source and time.
@@ -119,6 +120,7 @@ model/
   dcf.py             Projections, FCFF, terminal value, value per share
   monte_carlo.py     Vectorized Monte Carlo simulation of the DCF
   multiples.py       Valuation multiples
+  football_field.py  Value ranges per method for the football field chart
 ui/
   sidebar.py         Assumption controls
   tables.py          Table formatting

@@ -5,11 +5,12 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 from data.clean import add_income_margins, clean_company_statements
-from data.fetch import SEC_SOURCE_NOTE, get_company_data
+from data.fetch import SEC_SOURCE_NOTE, get_52_week_range, get_company_data
 from data.news import get_recent_news
 from data.snapshots import available_snapshots, load_saved_news
 from model.assumptions import DCF_INPUTS, default_assumptions
 from model.dcf import run_dcf
+from model.football_field import football_field
 from model.monte_carlo import run_monte_carlo_dcf
 from model.multiples import calculate_multiples
 from ui.sidebar import build_sidebar
@@ -696,7 +697,7 @@ def _display_monte_carlo(assumptions, company_data, valuation_result):
     )
     if valuation_result is None:
         st.info("Fix the issue shown on the Valuation tab to run the simulation.")
-        return
+        return None
 
     gordon = assumptions["terminal_method"] == "gordon"
     sims_col, dist_col, seed_col = st.columns(3)
@@ -879,6 +880,140 @@ def _display_monte_carlo(assumptions, company_data, valuation_result):
             "equity value: in those outcomes net debt exceeds the business's "
             "estimated enterprise value."
         )
+    return simulation
+
+
+_CATEGORY_LABELS = {
+    "intrinsic": "Intrinsic (DCF)",
+    "relative": "Relative (peers)",
+    "market": "Market",
+}
+
+
+def _display_football_field(
+    ticker, company_data, assumptions, income_statement, valuation_result, simulation
+):
+    st.subheader("Football field: every method side by side")
+    if valuation_result is None:
+        st.info("Fix the issue shown on the Valuation tab to see the football field.")
+        return
+
+    peer_tickers = st.session_state.get("multiples_peer_tickers", [])
+    peers = [_company_multiples(peer, assumptions["include_securities"]) for peer in peer_tickers]
+    week52 = get_52_week_range(company_data, ticker) or (None, None)
+    ranges = football_field(
+        assumptions,
+        income_statement,
+        [peer["multiples"] for peer in peers if "error" not in peer],
+        simulation,
+        *week52,
+    )
+    if not peer_tickers:
+        st.caption("Peer bars appear after you enter peers in the Multiples tab.")
+
+    methods = [r["method"] for r in ranges]
+    selected = st.multiselect("Methods shown", methods, default=methods)
+    ranges = [r for r in ranges if r["method"] in selected]
+    if not ranges:
+        st.info("Select at least one method to show.")
+        return
+
+    price = company_data["current_price"]
+    frame = pd.DataFrame(ranges)
+    frame["Category"] = frame["category"].map(_CATEGORY_LABELS)
+    view_low = min(frame["low"].min(), price)
+    view_high = max(frame["high"].max(), price)
+    # 10% each side leaves room for the $ labels drawn outside the bar ends.
+    padding = max(view_high - view_low, 1e-9) * 0.10
+    x_scale = alt.Scale(
+        domain=[view_low - padding, view_high + padding], zero=False, nice=False
+    )
+    order = list(frame["method"])
+    base = alt.Chart(frame).encode(
+        y=alt.Y(
+            "method:N",
+            sort=order,
+            title=None,
+            axis=alt.Axis(labelLimit=220),
+            scale=alt.Scale(paddingInner=0.35, paddingOuter=0.6),
+        )
+    )
+    bars = base.mark_bar().encode(
+        x=alt.X("low:Q", scale=x_scale, title="Value per share (USD)", axis=alt.Axis(format="$,.0f")),
+        x2="high:Q",
+        color=alt.Color(
+            "Category:N",
+            scale=alt.Scale(domain=list(_CATEGORY_LABELS.values())),
+            legend=alt.Legend(orient="bottom", title=None),
+        ),
+        tooltip=[
+            alt.Tooltip("method:N", title="Method"),
+            alt.Tooltip("low:Q", title="Low", format="$,.2f"),
+            alt.Tooltip("mid:Q", title="Mid", format="$,.2f"),
+            alt.Tooltip("high:Q", title="High", format="$,.2f"),
+            alt.Tooltip("note:N", title="Note"),
+        ],
+    )
+    mids = base.transform_filter("isValid(datum.mid)").mark_tick(
+        color="black", thickness=2, size=22
+    ).encode(x=alt.X("mid:Q", scale=x_scale))
+    low_labels = base.mark_text(align="right", dx=-4).encode(
+        x=alt.X("low:Q", scale=x_scale), text=alt.Text("low:Q", format="$,.0f")
+    )
+    high_labels = base.mark_text(align="left", dx=4).encode(
+        x=alt.X("high:Q", scale=x_scale), text=alt.Text("high:Q", format="$,.0f")
+    )
+    marker = alt.Chart(
+        pd.DataFrame({"price": [price], "label": [f"Current price ${price:,.2f}"]})
+    )
+    price_rule = marker.mark_rule(color="gray", strokeDash=[5, 3], strokeWidth=2).encode(
+        x=alt.X("price:Q", scale=x_scale)
+    )
+    # Put the label on the side of the line with more room so it isn't clipped.
+    label_left = price > (view_low + view_high) / 2
+    price_label = marker.mark_text(
+        align="right" if label_left else "left",
+        baseline="top",
+        dx=-4 if label_left else 4,
+        y=0,
+    ).encode(
+        x=alt.X("price:Q", scale=x_scale), text="label:N"
+    )
+    st.altair_chart(
+        (bars + mids + low_labels + high_labels + price_rule + price_label).properties(
+            height=alt.Step(40)
+        ),
+        width="stretch",
+        alt="Football field of value-per-share ranges by valuation method versus the current price",
+    )
+    st.caption(
+        "Each bar spans the low-to-high value per share from one method; the black "
+        "tick is its central estimate. Where bars overlap, the methods agree on value. "
+        "If the dashed current-price line sits left of most bars, the methods say the "
+        "stock looks cheap; right of most bars, expensive."
+    )
+
+    table = pd.DataFrame(
+        {
+            "Low": frame["low"],
+            "Mid": frame["mid"],
+            "High": frame["high"],
+            "Mid vs current price (%)": (frame["mid"] / price - 1) * 100,
+            "Note": frame["note"],
+        }
+    ).set_index(pd.Index(frame["method"], name="Method"))
+    st.dataframe(
+        table.style.format(
+            {
+                "Low": "${:,.2f}",
+                "Mid": "${:,.2f}",
+                "High": "${:,.2f}",
+                "Mid vs current price (%)": "{:+.1f}%",
+            },
+            na_rep="—",
+        ),
+        alt="Value per share range for each valuation method",
+    )
 
 
 def forecast_columns(forecast):
@@ -958,6 +1093,7 @@ if company_data:
     (
         valuation_tab,
         monte_carlo_tab,
+        football_field_tab,
         multiples_tab,
         income_tab,
         balance_tab,
@@ -967,6 +1103,7 @@ if company_data:
         [
             "Valuation",
             "Monte Carlo",
+            "Football field",
             "Multiples",
             "Income statement",
             "Balance sheet",
@@ -980,11 +1117,22 @@ if company_data:
         valuation_result = _display_valuation(assumptions, company_data)
 
     with monte_carlo_tab:
-        _display_monte_carlo(assumptions, company_data, valuation_result)
+        simulation = _display_monte_carlo(assumptions, company_data, valuation_result)
 
     with multiples_tab:
         _display_multiples(
             loaded_ticker, company_data, assumptions, valuation_result
+        )
+
+    # Filled after the Multiples tab so peers entered there show up in this run.
+    with football_field_tab:
+        _display_football_field(
+            loaded_ticker,
+            company_data,
+            assumptions,
+            income_statement,
+            valuation_result,
+            simulation,
         )
 
     with income_tab:

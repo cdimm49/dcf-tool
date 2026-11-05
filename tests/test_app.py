@@ -68,3 +68,20 @@ def test_bank_gets_one_clear_message(app):
 def test_payment_network_is_not_treated_as_a_bank(app):
     _load(app, "V")
     assert not any("banks, insurers" in w for w in _warnings(app))
+
+
+@pytest.mark.parametrize("ticker", ["AAPL", "BA"])
+def test_football_field_renders_without_52_week_request(app, monkeypatch, ticker):
+    import data.fetch
+
+    requested = []
+    monkeypatch.setattr(
+        data.fetch, "_cached_52_week_range", lambda symbol: requested.append(symbol)
+    )
+    _load(app, ticker)
+
+    assert any(s.value.startswith("Football field") for s in app.subheader)
+    shown = next(m for m in app.multiselect if m.label == "Methods shown")
+    assert "DCF: Gordon growth" in shown.value
+    assert "Monte Carlo (P10–P90)" in shown.value
+    assert requested == []

@@ -166,6 +166,27 @@ def _cached_live(symbol):
     return fetch_live(symbol)
 
 
+@st.cache_data(ttl=3600)
+def _cached_52_week_range(symbol):
+    closes = yf.Ticker(symbol).history(period="1y")["Close"].dropna()
+    if closes.empty:
+        raise LiveDataError(f"No price history for {symbol}.")  # raise: not cached
+    return float(closes.min()), float(closes.max())
+
+
+def get_52_week_range(company_data, symbol):
+    """(low, high) daily close over the past year, or None.
+
+    Saved snapshots skip the request entirely; a failed request is ignored.
+    """
+    if company_data.get("snapshot_date"):
+        return None
+    try:
+        return _cached_52_week_range(symbol)
+    except Exception:
+        return None
+
+
 def _sec_user_agent():
     """The SEC asks for a User-Agent with contact details, e.g. "DCF Tool you@email.com"."""
     agent = os.environ.get("SEC_USER_AGENT")
