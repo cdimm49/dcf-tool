@@ -1,6 +1,6 @@
 # DCF Valuation Tool
 
-Type a stock ticker and get an automatically built discounted cash flow (DCF) valuation, with every assumption adjustable, a sensitivity grid, peer multiples, cleaned financial statements and recent news.
+Type a stock ticker and get an automatically built discounted cash flow (DCF) valuation, with every assumption adjustable, a sensitivity grid, a Monte Carlo simulation, peer multiples, cleaned financial statements and recent news.
 
 **Live app:** [easy-dcf.streamlit.app](https://easy-dcf.streamlit.app)
 
@@ -11,6 +11,7 @@ Type a stock ticker and get an automatically built discounted cash flow (DCF) va
 - **Auto-built DCF.** Pulls a company's financials and market data, derives every assumption from its history, and outputs an implied value per share against the current price.
 - **Adjustable assumptions.** A sidebar slider or input for each variable in the model: revenue growth by year, margins, tax, reinvestment, each WACC component and the terminal value. A growth profile selector fills the five growth sliders with a preset: **Fade** (historical growth easing to terminal growth), **Flat** (historical growth held for five years) or **Custom** (set each year yourself). The valuation updates instantly, and a reset button restores the defaults.
 - **Sensitivity grid.** Value per share across WACC × terminal growth (or × exit multiple), with the current case highlighted.
+- **Monte Carlo simulation.** Runs the DCF thousands of times, randomly varying revenue growth, EBIT margin, WACC and the terminal assumption around your sidebar values, and shows the spread of outcomes: a histogram of value per share marked with the current price, the base case and the P10, P50 and P90 values, a percentile table, and the chance the stock is worth more than its price.
 - **Multiples and peers.** P/E, EV/EBITDA, EV/Sales, P/B and FCF yield, compared with any peer tickers you enter, plus a cross-check of the DCF value against peer P/E.
 - **Clean financial statements.** Income statement, balance sheet and cash flow in USD millions, with margin and growth rows.
 - **News.** Recent headlines for the ticker with source and time.
@@ -43,6 +44,22 @@ The model projects five years of unlevered free cash flow and discounts it at th
 
 The Valuation tab lists every assumption with its value and source, and marks any you've edited.
 
+## Monte Carlo simulation
+
+The single DCF answer depends on one set of assumptions. The Monte Carlo tab runs the same model 1,000 to 25,000 times, each time nudging the inputs at random around the sidebar values, to show how wide the plausible range is.
+
+| Input | How it varies |
+| --- | --- |
+| Revenue growth | One shock per trial applied to all five years, plus smaller yearly noise, so a trial that grows slowly tends to grow slowly every year. Each year's spread equals the chosen standard deviation. |
+| EBIT margin | One shock per trial, held for all five years |
+| WACC | Drawn around the sidebar value, never below 1% |
+| Terminal growth (Gordon) | Drawn around the sidebar value, then capped at WACC − 0.5% so the formula stays finite. The tab reports how often the cap applied. |
+| Exit multiple | Drawn around the sidebar value, never below 1× |
+
+Draws are Normal or Triangular, with the standard deviation for each input set in the tab, and a seed lock that keeps results steady between reruns. The engine (`model/monte_carlo.py`) works on NumPy arrays of shape (simulations, years) instead of building a table per trial, so 10,000 trials take milliseconds.
+
+It reuses the DCF's exact math, and the tests prove it: with every standard deviation set to zero, each simulated value matches `run_dcf` to within 1e-9, for Gordon and exit multiple, with the mid-year convention on and off.
+
 ## Data sources
 
 The app tries each source in order and labels what it used:
@@ -70,7 +87,7 @@ The DCF engine is pure Python with no data or UI code, so it can be tested on it
 | Value per share (Gordon) | $46.05 |
 | Value per share (10× exit multiple) | $41.40 |
 
-Other tests cover the assumption clamps and unit conversions, the multiples, the news parser (using a saved real response), terminal growth ≥ WACC raising an error, and the mid-year convention.
+Other tests cover the assumption clamps and unit conversions, the multiples, the news parser (using a saved real response), terminal growth ≥ WACC raising an error (for Gordon growth only), and the mid-year convention. With mid-year discounting on, a Gordon terminal value uses the final year's mid-year factor, while an exit-multiple terminal value, which models a sale at the end of year 5, is discounted over the full five years. The Monte Carlo engine is tested against `run_dcf` as described above, plus checks for reproducible seeds and for no NaN or infinite values when terminal growth sits close to WACC.
 
 ## Screenshots
 
@@ -94,6 +111,7 @@ model/
   assumptions.py     Derives default assumptions from history
   wacc.py            CAPM and WACC
   dcf.py             Projections, FCFF, terminal value, value per share
+  monte_carlo.py     Vectorized Monte Carlo simulation of the DCF
   multiples.py       Valuation multiples
 ui/
   sidebar.py         Assumption controls
@@ -126,13 +144,14 @@ python -m pytest -v
 
 ## Tech stack
 
-Python · Streamlit · pandas · yfinance · pytest
+Python · Streamlit · pandas · NumPy · Altair · yfinance · pytest
 
 ## Limitations
 
 - Data comes from Yahoo Finance through yfinance, an unofficial source. It can be delayed, incomplete or temporarily unavailable, and Yahoo sometimes rate-limits requests.
 - On the hosted app, statements come from SEC 10-K filings, so live data covers US-listed companies. SEC line items are mapped to Yahoo's layout and can differ slightly, for example in how leases count toward debt.
 - Defaults are mechanical, derived from a few years of history. They're a starting point to question, not a forecast.
+- The Monte Carlo spread comes from the volatility you choose for each input, and it treats the inputs as independent apart from the growth shocks. It shows how sensitive the value is to the assumptions, not a true probability that the stock is mispriced.
 - A standard DCF is a poor fit for banks, insurers and companies without positive operating profit.
 
 ## How it was built
