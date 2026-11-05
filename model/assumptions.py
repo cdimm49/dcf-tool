@@ -459,7 +459,8 @@ def default_assumptions(
         )
 
     if (
-        assumptions["wacc"] is not None
+        assumptions["terminal_method"] == "gordon"
+        and assumptions["wacc"] is not None
         and assumptions["terminal_growth"] >= assumptions["wacc"]
     ):
         errors.append("Terminal growth must be below WACC for a stable DCF.")

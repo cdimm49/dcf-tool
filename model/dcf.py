@@ -19,10 +19,12 @@ def run_dcf(
     mid_year=False,
 ):
     """Project free cash flow, discount it, and calculate equity value per share."""
-    if terminal_growth >= wacc:
-        raise ValueError("Terminal growth must be less than WACC.")
     if terminal_method not in {"gordon", "exit"}:
         raise ValueError("terminal_method must be 'gordon' or 'exit'.")
+    if terminal_method == "gordon" and terminal_growth >= wacc:
+        raise ValueError("Terminal growth must be less than WACC.")
+    if diluted_shares <= 0:
+        raise ValueError("Diluted shares must be greater than zero.")
 
     projections = []
     previous_revenue = base_revenue
@@ -68,7 +70,13 @@ def run_dcf(
             final_year["EBIT"] + final_year["D&A"]
         ) * exit_ebitda_multiple
 
-    pv_terminal_value = terminal_value * final_year["Discount Factor"]
+    # Gordon TV values the cash flows from year N+1 onward, which arrive spread
+    # through each year, so it shares year N's mid-year factor (N - 0.5). An exit
+    # multiple models a sale at the end of year N, so it is discounted a full N years.
+    if terminal_method == "exit" and mid_year:
+        pv_terminal_value = terminal_value / (1 + wacc) ** len(growth_rates)
+    else:
+        pv_terminal_value = terminal_value * final_year["Discount Factor"]
     enterprise_value = sum_pv_fcff + pv_terminal_value
     equity_value = enterprise_value - debt + cash
 
@@ -80,5 +88,7 @@ def run_dcf(
         "enterprise_value": enterprise_value,
         "equity_value": equity_value,
         "value_per_share": equity_value / diluted_shares,
-        "terminal_value_pct_ev": pv_terminal_value / enterprise_value,
+        "terminal_value_pct_ev": (
+            pv_terminal_value / enterprise_value if enterprise_value else None
+        ),
     }

@@ -64,3 +64,54 @@ def test_mid_year_convention_increases_value(dcf_inputs):
     mid_year_value = run_dcf(**dcf_inputs, mid_year=True)["value_per_share"]
 
     assert mid_year_value > year_end_value
+
+
+def test_exit_multiple_ignores_terminal_growth_above_wacc(dcf_inputs):
+    dcf_inputs["terminal_method"] = "exit"
+    dcf_inputs["terminal_growth"] = dcf_inputs["wacc"] + 0.01
+
+    result = run_dcf(**dcf_inputs)
+
+    assert result["enterprise_value"] == pytest.approx(4239.57, abs=0.01)
+
+
+def test_mid_year_discounts_exit_value_full_years_and_gordon_mid_year(dcf_inputs):
+    years = len(dcf_inputs["growth_rates"])
+    wacc_rate = dcf_inputs["wacc"]
+
+    gordon = run_dcf(**dcf_inputs, mid_year=True)
+    assert gordon["pv_terminal_value"] == pytest.approx(
+        gordon["terminal_value"] / (1 + wacc_rate) ** (years - 0.5)
+    )
+
+    dcf_inputs["terminal_method"] = "exit"
+    exit_result = run_dcf(**dcf_inputs, mid_year=True)
+    assert exit_result["pv_terminal_value"] == pytest.approx(
+        exit_result["terminal_value"] / (1 + wacc_rate) ** years
+    )
+
+
+@pytest.mark.parametrize("shares", [0, -1])
+def test_diluted_shares_must_be_positive(dcf_inputs, shares):
+    dcf_inputs["diluted_shares"] = shares
+
+    with pytest.raises(ValueError, match="Diluted shares must be greater than zero"):
+        run_dcf(**dcf_inputs)
+
+
+def test_terminal_value_pct_is_none_when_enterprise_value_is_zero(dcf_inputs):
+    dcf_inputs["base_revenue"] = 0
+
+    result = run_dcf(**dcf_inputs)
+
+    assert result["enterprise_value"] == 0
+    assert result["terminal_value_pct_ev"] is None
+
+
+def test_negative_equity_value_is_not_floored(dcf_inputs):
+    dcf_inputs["debt"] = 10_000
+
+    result = run_dcf(**dcf_inputs)
+
+    assert result["equity_value"] == pytest.approx(4705.16 - 10_000 + 100, abs=0.01)
+    assert result["value_per_share"] < 0

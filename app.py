@@ -271,7 +271,8 @@ def _display_assumptions(assumptions):
 
 def _display_valuation(assumptions, company_data):
     if (
-        assumptions["wacc"] is not None
+        assumptions["terminal_method"] == "gordon"
+        and assumptions["wacc"] is not None
         and assumptions["terminal_growth"] is not None
         and assumptions["terminal_growth"] >= assumptions["wacc"]
     ):
@@ -286,6 +287,14 @@ def _display_valuation(assumptions, company_data):
         st.warning(
             f"A DCF could not be calculated: {assumptions['error']} "
             "A DCF may not fit this company type or the available data."
+        )
+        _display_assumptions(assumptions)
+        return None
+
+    if assumptions["diluted_shares"] <= 0:
+        st.warning(
+            "Diluted shares must be greater than zero to calculate value per share. "
+            "Enter a share count in the sidebar."
         )
         _display_assumptions(assumptions)
         return None
@@ -305,6 +314,13 @@ def _display_valuation(assumptions, company_data):
     value_col.metric("Implied value per share", f"${result['value_per_share']:,.2f}")
     price_col.metric("Current share price", f"${current_price:,.2f}")
     upside_col.metric("Upside / downside", f"{upside:+.1f}%")
+
+    if result["equity_value"] < 0:
+        st.warning(
+            "Equity value is negative: net debt exceeds the business's estimated "
+            "enterprise value, so shareholders' claim is worth less than nothing "
+            "on these assumptions."
+        )
 
     _display_sensitivity(assumptions)
 
@@ -346,8 +362,9 @@ def _display_valuation(assumptions, company_data):
     )
 
     terminal_share = result["terminal_value_pct_ev"]
-    st.metric("Terminal value share of enterprise value", f"{terminal_share:.1%}")
-    if terminal_share > 0.75:
+    if terminal_share is not None:
+        st.metric("Terminal value share of enterprise value", f"{terminal_share:.1%}")
+    if terminal_share is not None and terminal_share > 0.75:
         st.warning(
             "More than 75% of enterprise value comes from the terminal value, "
             "so the estimate is especially sensitive to long-term assumptions."
@@ -579,9 +596,6 @@ def _display_sensitivity(assumptions):
                 inputs = {
                     **base_inputs,
                     "wacc": discount_rate,
-                    "terminal_growth": min(
-                        assumptions["terminal_growth"], discount_rate - 0.000001
-                    ),
                     "exit_ebitda_multiple": multiple,
                 }
                 row.append(run_dcf(**inputs)["value_per_share"])

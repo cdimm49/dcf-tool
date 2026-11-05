@@ -496,7 +496,11 @@ def build_sidebar(ticker, defaults, company_data):
                 "to the terminal growth set in the sidebar."
             )
 
-    if current_wacc is not None and terminal_growth is not None:
+    if (
+        terminal_method == "gordon"
+        and current_wacc is not None
+        and terminal_growth is not None
+    ):
         if terminal_growth >= current_wacc:
             with st.sidebar:
                 st.error(
