@@ -698,7 +698,10 @@ def _display_monte_carlo(assumptions, company_data, valuation_result):
     median_col, mean_col, range_col, above_col = st.columns(4)
     median_col.metric("Median value (P50)", f"${stats['p50']:,.2f}")
     mean_col.metric("Mean value", f"${stats['mean']:,.2f}")
-    range_col.metric("80% range (P10–P90)", f"${stats['p10']:,.0f} – ${stats['p90']:,.0f}")
+    # "\\$" keeps Streamlit from reading two dollar signs as a math expression.
+    range_col.metric(
+        "80% range (P10–P90)", f"\\${stats['p10']:,.0f} – \\${stats['p90']:,.0f}"
+    )
     above_col.metric("Chance above current price", f"{stats['prob_above_market']:.0%}")
     st.caption(
         "Read the 80% range as: in 8 of 10 simulated outcomes, the value per share "
@@ -778,7 +781,7 @@ def _display_monte_carlo(assumptions, company_data, valuation_result):
         st.caption(
             "Off the chart to keep the bars readable: "
             + ", ".join(
-                f"{row.Marker} (${row.Value:,.2f}, to the {side(row.Value)})"
+                f"{row.Marker} (\\${row.Value:,.2f}, to the {side(row.Value)})"
                 for row in off_chart.itertuples()
             )
             + "."
