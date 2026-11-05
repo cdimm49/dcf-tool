@@ -4,7 +4,7 @@ import altair as alt
 import numpy as np
 import pandas as pd
 import streamlit as st
-from data.clean import add_income_margins, clean_statement
+from data.clean import add_income_margins, clean_company_statements
 from data.fetch import SEC_SOURCE_NOTE, get_company_data
 from data.news import get_recent_news
 from data.snapshots import available_snapshots, load_saved_news
@@ -69,15 +69,33 @@ def _format_multiple(metric, value):
     return f"{value:.1f}x"
 
 
-def _is_financial_company(company_data):
+_FINANCIAL_INDUSTRY_WORDS = (
+    "bank",
+    "insurance",
+    "insurer",
+    "capital markets",
+    "mortgage",
+    "savings institution",
+)
+
+
+def _is_financial_company(company_data, income_statement):
+    """Banks, insurers and similar firms, where debt is part of operations.
+
+    The "Financial Services" sector alone isn't enough: it also covers payment
+    networks like Visa and Mastercard, which a standard DCF fits fine. So a company
+    counts if its industry names a lender or insurer, or if it's in a financial
+    sector and reports no operating income (as banks don't).
+    """
     sector = (company_data.get("sector") or "").casefold()
     industry = (company_data.get("industry") or "").casefold()
-    return (
-        "financial" in sector
-        or "bank" in industry
-        or "insurance" in industry
-        or "insurer" in industry
+    if any(word in industry for word in _FINANCIAL_INDUSTRY_WORDS):
+        return True
+    has_operating_income = (
+        "EBIT" in income_statement.index
+        and income_statement.loc["EBIT"].notna().any()
     )
+    return "financial" in sector and not has_operating_income
 
 
 def _friendly_ticker_error(fetched_data, symbol):
@@ -172,20 +190,24 @@ def _display_news(ticker):
             st.write(summary)
 
 
+class MultiplesError(Exception):
+    """A company's multiples couldn't be fetched or calculated."""
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def _cached_company_multiples(ticker, include_securities):
-    """Fetch and calculate a company's multiples once per ticker and cash setting."""
+    """Fetch and calculate a company's multiples once per ticker and cash setting.
+
+    Failures raise instead of returning an error, because Streamlit doesn't cache
+    exceptions: a temporary problem is retried on the next run, not kept an hour.
+    """
     company_data = get_company_data(ticker)
     if "error" in company_data:
-        return {"error": company_data["error"]}
+        raise MultiplesError(company_data["error"])
 
     try:
-        income_statement = clean_statement(
-            company_data["income_statement"], "income"
-        )
-        balance_sheet = clean_statement(company_data["balance_sheet"], "balance")
-        cash_flow_statement = clean_statement(
-            company_data["cash_flow_statement"], "cashflow"
+        income_statement, balance_sheet, cash_flow_statement = (
+            clean_company_statements(company_data)
         )
         multiples = calculate_multiples(
             income_statement,
@@ -200,7 +222,7 @@ def _cached_company_multiples(ticker, include_securities):
             include_securities=include_securities,
         )
     except Exception as error:
-        return {"error": f"Could not calculate multiples for {ticker}: {error}"}
+        raise MultiplesError(f"Could not calculate multiples for {ticker}: {error}") from error
 
     return {
         "company_name": company_data["company_name"],
@@ -231,7 +253,7 @@ def _display_assumptions(assumptions):
         "diluted_shares": "Diluted shares",
         "mid_year": "Mid-year convention",
         "risk_free_rate": "Risk-free rate",
-        "beta": "Beta",
+        "beta": "Beta (adjusted)",
         "erp": "Equity risk premium",
         "pre_tax_cost_of_debt": "Pre-tax cost of debt",
         "equity_weight": "Equity weight",
@@ -287,9 +309,10 @@ def _display_valuation(assumptions, company_data):
         return None
 
     if assumptions["error"]:
+        reason = assumptions["error"].rstrip(". ") + "."
         st.warning(
-            f"A DCF could not be calculated: {assumptions['error']} "
-            "A DCF may not fit this company type or the available data."
+            f"A DCF could not be calculated: {reason} A standard DCF may not fit "
+            "this company type or the available data."
         )
         _display_assumptions(assumptions)
         return None
@@ -377,6 +400,13 @@ def _display_valuation(assumptions, company_data):
     return result
 
 
+def _company_multiples(ticker, include_securities):
+    try:
+        return _cached_company_multiples(ticker, include_securities)
+    except MultiplesError as error:
+        return {"error": str(error)}
+
+
 def _display_multiples(
     ticker, company_data, assumptions, valuation_result
 ):
@@ -385,14 +415,17 @@ def _display_multiples(
         "reported earnings, sales, assets, or cash flow."
     )
     include_securities = assumptions["include_securities"]
-    selected = _cached_company_multiples(ticker, include_securities)
+    selected = _company_multiples(ticker, include_securities)
     if "error" in selected:
         st.error(selected["error"])
         return
 
     descriptions = {
         "P/E": "Share price for each dollar of the latest diluted EPS.",
-        "EV/EBITDA": "Business value for each dollar of the latest EBITDA.",
+        "EV/EBITDA": (
+            "Business value for each dollar of the latest EBITDA "
+            "(operating income plus D&A)."
+        ),
         "EV/Sales": "Business value for each dollar of the latest sales.",
         "P/B": "Market value for each dollar of shareholders’ equity.",
         "FCF yield": "Free cash flow as a share of market value.",
@@ -459,7 +492,7 @@ def _display_multiples(
             }
         ]
         for peer_ticker in peer_tickers:
-            peer = _cached_company_multiples(peer_ticker, include_securities)
+            peer = _company_multiples(peer_ticker, include_securities)
             if "error" in peer:
                 st.warning(f"{peer_ticker}: {peer['error']}")
                 peer_values.append({metric: float("nan") for metric in descriptions})
@@ -559,7 +592,12 @@ def _display_sensitivity(assumptions):
     base_inputs = {name: assumptions[name] for name in DCF_INPUTS}
 
     if assumptions["terminal_method"] == "gordon":
-        terminal_values = [0.015 + step * 0.005 for step in range(5)]
+        # Centered on the current terminal growth, so the middle column is the
+        # current case.
+        terminal_values = [
+            round(assumptions["terminal_growth"] + (step - 2) * 0.005, 10)
+            for step in range(5)
+        ]
         column_labels = [f"{value:.1%}" for value in terminal_values]
         row_labels = [f"{value:.2%}" for value in wacc_values]
         rows = []
@@ -586,10 +624,20 @@ def _display_sensitivity(assumptions):
             ),
         )
     else:
-        terminal_values = [
-            round(assumptions["exit_ebitda_multiple"] + offset, 8)
-            for offset in (-10, -5, 0, 5, 10)
-        ]
+        base_multiple = assumptions["exit_ebitda_multiple"]
+        if base_multiple > 0:
+            # Relative steps keep every column positive (a flat ±10x would show
+            # negative multiples for a company trading at 9x).
+            terminal_values = [
+                round(base_multiple * (1 + change), 8)
+                for change in (-0.4, -0.2, 0.0, 0.2, 0.4)
+            ]
+        else:
+            terminal_values = [5.0, 7.5, 10.0, 12.5, 15.0]
+            st.caption(
+                "No current EV/EBITDA was available, so the columns show a typical "
+                "range of exit multiples."
+            )
         column_labels = [f"{value:.1f}x" for value in terminal_values]
         row_labels = [f"{value:.2%}" for value in wacc_values]
         rows = []
@@ -606,11 +654,13 @@ def _display_sensitivity(assumptions):
         table = pd.DataFrame(rows, index=row_labels, columns=column_labels)
         table.index.name = "WACC"
         table.columns.name = "Exit EV / EBITDA"
-        closest_column = min(
-            range(len(terminal_values)),
-            key=lambda index: abs(
-                terminal_values[index] - assumptions["exit_ebitda_multiple"]
-            ),
+        closest_column = (
+            min(
+                range(len(terminal_values)),
+                key=lambda index: abs(terminal_values[index] - base_multiple),
+            )
+            if base_multiple > 0
+            else None
         )
 
     closest_row = min(
@@ -620,9 +670,10 @@ def _display_sensitivity(assumptions):
 
     def highlight_closest_cell(frame):
         styles = pd.DataFrame("", index=frame.index, columns=frame.columns)
-        styles.iloc[closest_row, closest_column] = (
-            "background-color: #1f6feb; color: white; font-weight: bold;"
-        )
+        if closest_column is not None:
+            styles.iloc[closest_row, closest_column] = (
+                "background-color: #1f6feb; color: white; font-weight: bold;"
+            )
         return styles
 
     st.dataframe(
@@ -821,8 +872,10 @@ def _display_monte_carlo(assumptions, company_data, valuation_result):
             "terminal growth std."
         )
     if stats["prob_negative_equity"] > 0:
+        share = stats["prob_negative_equity"]
+        share_text = "Fewer than 0.1%" if share < 0.001 else f"{share:.1%}"
         st.warning(
-            f"{stats['prob_negative_equity']:.1%} of simulations produced negative "
+            f"{share_text} of simulations produced negative "
             "equity value: in those outcomes net debt exceeds the business's "
             "estimated enterprise value."
         )
@@ -879,19 +932,16 @@ if company_data:
         )
     if company_data["diluted_shares_outstanding"] is None:
         st.warning("Diluted shares outstanding are unavailable.")
-    if _is_financial_company(company_data):
+    income_statement, balance_sheet, cash_flow_statement = clean_company_statements(
+        company_data
+    )
+    if _is_financial_company(company_data, income_statement):
         st.warning(
-            "A standard DCF may not fit banks or insurers because debt and "
-            "working capital are part of their operations."
+            "A standard DCF may not fit banks, insurers and similar financial "
+            "companies, because debt and working capital are part of their "
+            "operations."
         )
-
-    income_statement = add_income_margins(
-        clean_statement(company_data["income_statement"], "income")
-    )
-    balance_sheet = clean_statement(company_data["balance_sheet"], "balance")
-    cash_flow_statement = clean_statement(
-        company_data["cash_flow_statement"], "cashflow"
-    )
+    income_statement = add_income_margins(income_statement)
     market_data = {
         "current_price": company_data["current_price"],
         "diluted_shares_outstanding": company_data["diluted_shares_outstanding"],
@@ -956,6 +1006,6 @@ elif not st.session_state.get("ticker_error"):
     st.info("Enter a ticker and select Run to begin a valuation.")
 
 st.caption(
-    "Educational tool, not investment advice. Data from Yahoo Finance via "
-    "yfinance and may be delayed or incomplete."
+    "Educational tool, not investment advice. Data from Yahoo Finance (via "
+    "yfinance) and SEC EDGAR filings, and may be delayed or incomplete."
 )

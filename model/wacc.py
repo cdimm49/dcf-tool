@@ -1,3 +1,13 @@
+def adjusted_beta(raw_beta):
+    """Blume-adjusted beta: 2/3 x raw beta + 1/3 x 1.0.
+
+    Betas measured from past returns drift toward the market average of 1.0 over
+    time, so a raw beta of 0.15 overstates how little risk a stock carries. This
+    is the adjustment Bloomberg reports as "adjusted beta".
+    """
+    return 2 / 3 * raw_beta + 1 / 3
+
+
 def cost_of_equity(rf, beta, erp):
     """Calculate the CAPM cost of equity from the risk-free rate and ERP."""
     return rf + beta * erp

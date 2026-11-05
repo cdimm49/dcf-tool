@@ -32,7 +32,7 @@ warnings.filterwarnings("ignore")
 
 import pandas as pd  # noqa: E402
 
-from data.clean import clean_statement  # noqa: E402
+from data.clean import clean_company_statements  # noqa: E402
 from data.fetch import fetch_live, fetch_sec_hybrid  # noqa: E402
 from model.assumptions import DCF_INPUTS, default_assumptions  # noqa: E402
 from model.dcf import run_dcf  # noqa: E402
@@ -59,11 +59,8 @@ CHECKS = [
 
 
 def _cleaned(data):
-    return {
-        "income": clean_statement(data["income_statement"], "income"),
-        "balance": clean_statement(data["balance_sheet"], "balance"),
-        "cashflow": clean_statement(data["cash_flow_statement"], "cashflow"),
-    }
+    income, balance, cashflow = clean_company_statements(data)
+    return {"income": income, "balance": balance, "cashflow": cashflow}
 
 
 def _value_per_share(data, cleaned):

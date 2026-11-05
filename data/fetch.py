@@ -11,6 +11,8 @@ from data import sec, snapshots
 # it), skip Yahoo statements for this long so visitors don't wait on a blocked
 # connection every time.
 BLOCK_SECONDS = 600
+# How long a price and Treasury yield are reused on the SEC path.
+QUOTE_TTL_SECONDS = 600
 _live_blocked_until = 0.0
 SEC_SOURCE_NOTE = (
     "Financial statements from SEC 10-K filings; price and beta from Yahoo Finance."
@@ -221,52 +223,79 @@ def _yahoo_beta(symbol):
         return None
 
 
-def fetch_sec_hybrid(symbol, user_agent):
-    """Statements from SEC filings plus price, beta and Treasury yield from Yahoo's
-    price data, which Yahoo still serves to cloud servers."""
+def _sec_statement_data(symbol, user_agent):
+    """SEC statements plus a beta estimate. Both change slowly, so they're cached
+    for hours."""
     filings = sec.fetch_company(symbol, user_agent)
+    beta = _yahoo_beta(symbol)
+    return {**filings, "beta": beta}
 
+
+def _quote(symbol):
+    """Latest close and Treasury yield. These move during the day, so they're
+    cached for minutes, not hours."""
     try:
         current_price = _latest_close(symbol)
     except Exception as error:
         raise LiveDataError(f"Price for {symbol} is unavailable: {error}") from error
     if current_price is None:
         raise LiveDataError(f"Price for {symbol} is unavailable.")
+    return {"current_price": current_price, "risk_free_rate": _get_risk_free_yield()}
 
+
+def _combine_sec(statement_data, quote):
     diluted_shares, diluted_shares_source = _latest_diluted_shares(
-        filings["income_statement"]
+        statement_data["income_statement"]
     )
     if diluted_shares_source:
         diluted_shares_source += " (SEC 10-K)"
-    elif filings.get("shares_outstanding"):
-        diluted_shares = filings["shares_outstanding"]
+    elif statement_data.get("shares_outstanding"):
+        diluted_shares = statement_data["shares_outstanding"]
         diluted_shares_source = "Shares outstanding from the latest SEC filing's cover page"
-    beta = _yahoo_beta(symbol)
+    beta = statement_data["beta"]
 
     return {
-        "company_name": filings["company_name"],
-        "current_price": current_price,
+        "company_name": statement_data["company_name"],
+        "current_price": quote["current_price"],
         "diluted_shares_outstanding": diluted_shares,
         "diluted_shares_source": diluted_shares_source,
         "beta": beta,
         "beta_source": (
-            "Estimated from 5 years of monthly returns against the S&P 500."
+            "Raw beta estimated from 5 years of monthly returns against the S&P 500."
             if beta is not None
             else None
         ),
-        "risk_free_rate": _get_risk_free_yield(),
-        "sector": filings["sector"],
-        "industry": filings["industry"],
-        "income_statement": filings["income_statement"],
-        "balance_sheet": filings["balance_sheet"],
-        "cash_flow_statement": filings["cash_flow_statement"],
+        "risk_free_rate": quote["risk_free_rate"],
+        "sector": statement_data["sector"],
+        "industry": statement_data["industry"],
+        "income_statement": statement_data["income_statement"],
+        "balance_sheet": statement_data["balance_sheet"],
+        "cash_flow_statement": statement_data["cash_flow_statement"],
         "data_source": "sec",
     }
 
 
+def fetch_sec_hybrid(symbol, user_agent):
+    """Statements from SEC filings plus price, beta and Treasury yield from Yahoo's
+    price data, which Yahoo still serves to cloud servers."""
+    statement_data = _sec_statement_data(symbol, user_agent)
+    return _combine_sec(statement_data, _quote(symbol))
+
+
 @st.cache_data(ttl=6 * 3600)
+def _cached_sec_statements(symbol):
+    return _sec_statement_data(symbol, _sec_user_agent())
+
+
+@st.cache_data(ttl=QUOTE_TTL_SECONDS)
+def _cached_quote(symbol):
+    return _quote(symbol)
+
+
 def _cached_sec(symbol):
-    return fetch_sec_hybrid(symbol, _sec_user_agent())
+    # Statements first, so an unknown ticker fails before any price request.
+    statement_data = _cached_sec_statements(symbol)
+    return _combine_sec(statement_data, _cached_quote(symbol))
 
 
 def get_company_data(ticker):

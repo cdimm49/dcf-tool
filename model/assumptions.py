@@ -3,7 +3,7 @@ import re
 
 import pandas as pd
 
-from model.wacc import cost_of_equity, wacc
+from model.wacc import adjusted_beta, cost_of_equity, wacc
 
 
 DCF_INPUTS = (
@@ -139,10 +139,22 @@ def _fiscal_year(label):
     return int(match.group(1)) if match else None
 
 
+NWC_RATIO_RANGE = (-0.10, 0.20)
+NWC_FALLBACK = 0.05
+
+
 def _working_capital_ratio(income, cashflow):
+    """Working-capital investment per dollar of revenue added.
+
+    Uses totals over the latest three years rather than year-by-year ratios, so
+    one odd year (a tiny revenue change, a one-off swing) doesn't throw out the
+    history. The result is clamped to -10%..20%: negative values are allowed
+    because some businesses (Costco, Walmart) are funded by their suppliers and
+    release cash as they grow.
+    """
     revenue = _row_values(income, "Revenue")
     working_capital = _row_values(cashflow, "Change in Working Capital")
-    ratios = []
+    invested, added, years = 0.0, 0.0, 0
     for position, column in enumerate(income.columns[:-1]):
         current_revenue = _number(revenue.get(column))
         prior_revenue = _number(revenue.get(income.columns[position + 1]))
@@ -152,43 +164,48 @@ def _working_capital_ratio(income, cashflow):
             and prior_revenue is not None
             and cashflow_value is not None
         ):
-            revenue_change = current_revenue - prior_revenue
-            if revenue_change <= 0 or revenue_change < current_revenue * 0.01:
-                return (
-                    0.05,
-                    "Fallback 5%; revenue change was negative or less than 1% of revenue.",
-                )
             # Cash-flow statements report working-capital investment as a cash outflow.
-            ratio = -cashflow_value / revenue_change
-            if not 0 <= ratio <= 0.20:
-                return (
-                    0.05,
-                    "Fallback 5%; a historical working-capital ratio was outside 0%-20%.",
-                )
-            ratios.append(ratio)
-        if len(ratios) == 3:
+            invested += -cashflow_value
+            added += current_revenue - prior_revenue
+            years += 1
+        if years == 3:
             break
-    if not ratios:
+
+    if years == 0:
         return (
-            0.05,
+            NWC_FALLBACK,
             "Fallback 5%; historical working-capital investment could not be calculated.",
         )
-    return sum(ratios) / len(ratios), (
-        "Average historical working-capital investment / revenue change; "
-        "all included years had revenue growth of at least 1% and ratios of 0%-20%."
+    latest_revenue = _number(revenue.dropna().iloc[0]) if not revenue.dropna().empty else None
+    if latest_revenue is None or added <= 0.01 * abs(latest_revenue):
+        return (
+            NWC_FALLBACK,
+            "Fallback 5%; revenue shrank or barely grew over the period, so the "
+            "historical ratio isn't meaningful.",
+        )
+
+    ratio = invested / added
+    low, high = NWC_RATIO_RANGE
+    clamped = min(max(ratio, low), high)
+    source = (
+        f"Total working-capital investment / total revenue added over the latest "
+        f"{years} year{'s' if years != 1 else ''}"
     )
+    if clamped != ratio:
+        source += f" ({ratio:.0%}), clamped to {low:.0%} to {high:.0%}."
+    else:
+        source += f", within the {low:.0%} to {high:.0%} range."
+    return clamped, source
 
 
 def _risk_free_rate(market_data):
     quoted_yield = _number(market_data.get("risk_free_rate"))
     if quoted_yield is None:
         return 0.04, "Assumed 4.0%; current ^TNX Treasury yield was unavailable."
-    if quoted_yield >= 20:
-        rate = quoted_yield / 1000
-    elif quoted_yield >= 1:
-        rate = quoted_yield / 100
-    else:
-        rate = quoted_yield
+    # ^TNX is quoted in percent (4.25 means 4.25%), including below 1% as in 2020,
+    # so it's always divided by 100. Very old data used ten times the yield
+    # (42.5 for 4.25%); no real 10-year yield has been 20% or higher.
+    rate = quoted_yield / 1000 if quoted_yield >= 20 else quoted_yield / 100
     return rate, "Current ^TNX 10-year Treasury yield, normalized to a decimal rate."
 
 
@@ -289,7 +306,7 @@ def default_assumptions(
     ebit_margin = _recent_average_ratio(cleaned_income, cleaned_income, "EBIT")
     assumptions["ebit_margin"] = ebit_margin
     if ebit_margin is None:
-        errors.append("No reported EBIT is available; a DCF may not fit this company type.")
+        errors.append("No reported EBIT is available.")
     else:
         sources["ebit_margin"] = "Average EBIT / revenue for the latest available three years."
 
@@ -375,12 +392,17 @@ def default_assumptions(
         errors.append("Market capitalization is unavailable; WACC cannot be weighted.")
 
     risk_free_rate, risk_free_source = _risk_free_rate(market_data)
-    beta = _number(market_data.get("beta"))
-    if beta is None:
+    raw_beta = _number(market_data.get("beta"))
+    if raw_beta is None:
         beta = 1.0
-        beta_source = "Assumed beta of 1.0; yfinance beta was unavailable."
+        beta_source = "Assumed beta of 1.0; no beta was available."
     else:
-        beta_source = market_data.get("beta_source") or "Beta reported by yfinance."
+        beta = adjusted_beta(raw_beta)
+        raw_source = market_data.get("beta_source") or "Raw beta reported by Yahoo Finance."
+        beta_source = (
+            f"Adjusted beta: ⅔ × raw beta {raw_beta:.2f} + ⅓ × 1.0, the Blume "
+            f"adjustment Bloomberg reports. {raw_source}"
+        )
     equity_cost = cost_of_equity(risk_free_rate, beta, 0.05)
 
     interest_period = _row_values(cleaned_income, "Interest Expense")
@@ -417,7 +439,8 @@ def default_assumptions(
         assumptions["debt_weight"] = None
     sources["wacc"] = (
         (
-            f"CAPM equity cost (rf {risk_free_rate:.2%}, beta {beta:g}, ERP 5%) and "
+            f"CAPM equity cost (rf {risk_free_rate:.2%}, adjusted beta {beta:.2f}, "
+            "ERP 5%) and "
             "market-cap / debt weights."
         )
         if market_cap is not None
@@ -431,6 +454,7 @@ def default_assumptions(
     sources["debt_weight"] = "Most recent reported total debt, in USD millions."
     assumptions["risk_free_rate"] = risk_free_rate
     assumptions["beta"] = beta
+    assumptions["raw_beta"] = raw_beta
     assumptions["erp"] = 0.05
     assumptions["pre_tax_cost_of_debt"] = debt_cost
     sources["risk_free_rate"] = risk_free_source
@@ -438,6 +462,8 @@ def default_assumptions(
     sources["erp"] = "Assumed equity risk premium of 5.0%."
     sources["pre_tax_cost_of_debt"] = debt_cost_source
 
+    # EBITDA is operating income + D&A (see data.clean.use_operating_ebitda),
+    # the same measure the exit-multiple terminal value is applied to.
     ebitda = _recent_value(cleaned_income, "EBITDA")
     if ebitda is None:
         ebit = _recent_value(cleaned_income, "EBIT")
@@ -450,7 +476,8 @@ def default_assumptions(
             enterprise_value / ebitda if enterprise_value > 0 else 0.0
         )
         sources["exit_ebitda_multiple"] = (
-            "Current enterprise value (market cap + debt - cash) / latest EBITDA."
+            "Current enterprise value (market cap + debt - cash) / latest EBITDA "
+            "(operating income + D&A)."
         )
     else:
         sources["exit_ebitda_multiple"] = (

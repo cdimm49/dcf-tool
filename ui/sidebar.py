@@ -231,7 +231,12 @@ def build_sidebar(ticker, defaults, company_data):
             beta_default = float(defaults.get("beta") or 0.0)
             beta_min, beta_max = _slider_bounds(beta_default, 0.0, 4.0)
             beta = st.slider(
-                "Beta",
+                "Beta (adjusted)",
+                help=(
+                    "Starts at the adjusted beta: ⅔ × the raw beta measured from "
+                    "past returns + ⅓ × 1.0, because betas drift toward the market "
+                    "average over time."
+                ),
                 min_value=beta_min,
                 max_value=beta_max,
                 step=0.05,

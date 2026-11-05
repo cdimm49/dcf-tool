@@ -1,0 +1,70 @@
+"""Runs the whole Streamlit app on saved snapshots, the way a visitor would.
+
+Unit tests check the math; these catch the app itself breaking: a widget
+error, a crash for an unusual company, or a tab that stops rendering.
+"""
+
+from pathlib import Path
+
+import pytest
+from streamlit.testing.v1 import AppTest
+
+APP = str(Path(__file__).resolve().parents[1] / "app.py")
+
+
+@pytest.fixture
+def app(monkeypatch):
+    # Saved data only: no network, and the same numbers every run.
+    monkeypatch.setenv("DCF_FORCE_SNAPSHOT", "1")
+    app = AppTest.from_file(APP, default_timeout=60)
+    app.run()
+    return app
+
+
+def _load(app, ticker):
+    app.text_input(key="ticker_input").set_value(ticker)
+    next(button for button in app.button if button.label == "Run").click().run()
+    assert not app.exception, [error.value for error in app.exception]
+
+
+def _metric(app, label):
+    return next((m.value for m in app.metric if m.label == label), None)
+
+
+def _warnings(app):
+    return [warning.value for warning in app.warning]
+
+
+@pytest.mark.parametrize("ticker", ["AAPL", "BA", "NFLX", "XOM", "V"])
+def test_valuation_and_monte_carlo_render_for_both_terminal_methods(app, ticker):
+    _load(app, ticker)
+    assert _metric(app, "Implied value per share") is not None
+    assert _metric(app, "Median value (P50)") is not None
+
+    app.radio(key="dcf_terminal_method").set_value("exit").run()
+    assert not app.exception
+    grid = next(
+        frame.value
+        for frame in app.dataframe
+        if frame.value.columns.name == "Exit EV / EBITDA"
+    )
+    multiples = [float(label.rstrip("x")) for label in grid.columns]
+    assert all(multiple > 0 for multiple in multiples)
+
+
+def test_switching_tickers_in_one_session(app):
+    for ticker in ["AAPL", "JPM", "MSFT"]:
+        _load(app, ticker)
+
+
+def test_bank_gets_one_clear_message(app):
+    _load(app, "JPM")
+    messages = [w for w in _warnings(app) if "could not be calculated" in w]
+    assert len(messages) == 1
+    assert messages[0].count("may not fit") == 1
+    assert any("banks, insurers" in w for w in _warnings(app))
+
+
+def test_payment_network_is_not_treated_as_a_bank(app):
+    _load(app, "V")
+    assert not any("banks, insurers" in w for w in _warnings(app))

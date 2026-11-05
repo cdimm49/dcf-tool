@@ -146,6 +146,37 @@ def clean_statement(df, kind):
     return result
 
 
+def use_operating_ebitda(income, cashflow):
+    """Return the income statement with EBITDA defined as EBIT + D&A.
+
+    EBIT here is operating income, so this is the EBITDA the exit-multiple terminal
+    value is applied to. Yahoo's own EBITDA row starts from pretax income plus
+    interest, which adds non-operating income and can differ by 20% or more; using
+    it to set the exit multiple would measure the multiple on one number and apply
+    it to another. SEC data is built this way already. A year without D&A keeps
+    the reported figure.
+    """
+    result = income.copy()
+    if "EBIT" not in result.index or cashflow is None or "D&A" not in cashflow.index:
+        return result
+    if "EBITDA" not in result.index:
+        result.loc["EBITDA"] = float("nan")
+    for column in result.columns:
+        ebit = result.at["EBIT", column]
+        da = cashflow.at["D&A", column] if column in cashflow.columns else float("nan")
+        if not (pd.isna(ebit) or pd.isna(da)):
+            result.at["EBITDA", column] = ebit + abs(da)
+    return result
+
+
+def clean_company_statements(company_data):
+    """Clean all three statements and apply the operating EBITDA definition."""
+    income = clean_statement(company_data["income_statement"], "income")
+    balance = clean_statement(company_data["balance_sheet"], "balance")
+    cashflow = clean_statement(company_data["cash_flow_statement"], "cashflow")
+    return use_operating_ebitda(income, cashflow), balance, cashflow
+
+
 def add_income_margins(df):
     """Append income margins and year-over-year revenue growth as numeric ratios."""
     result = df.copy()

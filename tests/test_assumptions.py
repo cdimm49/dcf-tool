@@ -90,47 +90,57 @@ def test_missing_ebit_returns_warning_and_uses_market_data_fallbacks(
     assert assumptions["pre_tax_cost_of_debt"] == pytest.approx(0.055)
 
 
-def test_small_revenue_change_falls_back_to_five_percent(company_statements):
-    income, balance, cashflow = company_statements
-    income.loc["Revenue"] = [1000, 995, 800]
-    cashflow.loc["Change in Working Capital"] = [-50, -20, -10]
+MARKET = {"current_price": 50, "diluted_shares_outstanding": 1_000_000_000}
 
-    assumptions = default_assumptions(
-        income,
-        balance,
-        cashflow,
-        {
-            "current_price": 50,
-            "diluted_shares_outstanding": 1_000_000_000,
-        },
+
+def _nwc(income, balance, cashflow):
+    assumptions = default_assumptions(income, balance, cashflow, MARKET)
+    return (
+        assumptions["delta_nwc_pct_revenue_change"],
+        assumptions["sources"]["delta_nwc_pct_revenue_change"],
     )
 
-    assert assumptions["delta_nwc_pct_revenue_change"] == pytest.approx(0.05)
-    assert "revenue change was negative or less than 1%" in assumptions["sources"][
-        "delta_nwc_pct_revenue_change"
-    ]
+
+def test_one_tiny_revenue_change_no_longer_discards_the_history(company_statements):
+    income, balance, cashflow = company_statements
+    income.loc["Revenue"] = [1000, 995, 800]
+    cashflow.loc["Change in Working Capital"] = [-1, -19, -10]
+
+    ratio, source = _nwc(income, balance, cashflow)
+
+    # (1 + 19) invested over (5 + 195) of revenue added = 10%.
+    assert ratio == pytest.approx(0.10)
+    assert "within the -10% to 20% range" in source
 
 
-def test_historical_working_capital_ratio_outside_range_falls_back(
-    company_statements,
-):
+def test_working_capital_ratio_above_range_is_clamped(company_statements):
     income, balance, cashflow = company_statements
     cashflow.loc["Change in Working Capital"] = [-80, -64, -48]
 
-    assumptions = default_assumptions(
-        income,
-        balance,
-        cashflow,
-        {
-            "current_price": 50,
-            "diluted_shares_outstanding": 1_000_000_000,
-        },
-    )
+    ratio, source = _nwc(income, balance, cashflow)
 
-    assert assumptions["delta_nwc_pct_revenue_change"] == pytest.approx(0.05)
-    assert "historical working-capital ratio was outside 0%-20%" in assumptions[
-        "sources"
-    ]["delta_nwc_pct_revenue_change"]
+    # 144 invested over 400 added is 36%, clamped to 20%.
+    assert ratio == pytest.approx(0.20)
+    assert "(36%), clamped to -10% to 20%" in source
+
+
+def test_supplier_funded_working_capital_can_be_negative(company_statements):
+    income, balance, cashflow = company_statements
+    cashflow.loc["Change in Working Capital"] = [10, 8, 6]  # cash released as sales grow
+
+    ratio, _source = _nwc(income, balance, cashflow)
+
+    assert ratio == pytest.approx(-18 / 400)
+
+
+def test_shrinking_revenue_falls_back_to_five_percent(company_statements):
+    income, balance, cashflow = company_statements
+    income.loc["Revenue"] = [800, 900, 1000]
+
+    ratio, source = _nwc(income, balance, cashflow)
+
+    assert ratio == pytest.approx(0.05)
+    assert "revenue shrank or barely grew" in source
 
 
 def test_securities_are_normalized_and_included_in_cash_by_default(company_statements):
@@ -270,3 +280,31 @@ def _sample_company_statements():
     )
     cashflow = pd.DataFrame(index=["Change in Working Capital"])
     return income, None, cashflow
+
+
+def test_beta_is_blume_adjusted_and_labeled(company_statements):
+    income, balance, cashflow = company_statements
+
+    assumptions = default_assumptions(
+        income, balance, cashflow, {**MARKET, "beta": 0.15}
+    )
+
+    assert assumptions["raw_beta"] == pytest.approx(0.15)
+    assert assumptions["beta"] == pytest.approx(2 / 3 * 0.15 + 1 / 3)
+    assert assumptions["sources"]["beta"].startswith("Adjusted beta")
+
+
+@pytest.mark.parametrize(
+    ("quoted", "expected"),
+    [(4.95, 0.0495), (0.9, 0.009), (0.55, 0.0055), (42.5, 0.0425)],
+)
+def test_treasury_yield_is_read_as_percent_even_below_one(
+    company_statements, quoted, expected
+):
+    income, balance, cashflow = company_statements
+
+    assumptions = default_assumptions(
+        income, balance, cashflow, {**MARKET, "risk_free_rate": quoted}
+    )
+
+    assert assumptions["risk_free_rate"] == pytest.approx(expected)

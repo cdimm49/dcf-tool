@@ -162,3 +162,44 @@ def test_estimate_beta_recovers_a_known_beta():
 
     assert fetch.estimate_beta(stock, market) == 1.5
     assert fetch.estimate_beta(stock[:10], market[:10]) is None  # too little history
+
+
+def test_sec_price_comes_from_the_short_quote_cache(monkeypatch):
+    statements = _LiveStub(
+        result={
+            "company_name": "SEC Corp",
+            "shares_outstanding": 1_000.0,
+            "sector": None,
+            "industry": None,
+            "income_statement": pd.DataFrame(),
+            "balance_sheet": pd.DataFrame(),
+            "cash_flow_statement": pd.DataFrame(),
+            "beta": 1.1,
+        }
+    )
+    quote = _LiveStub(result={"current_price": 42.0, "risk_free_rate": 4.2})
+    monkeypatch.setattr(fetch, "_cached_sec_statements", statements)
+    monkeypatch.setattr(fetch, "_cached_quote", quote)
+
+    data = fetch._cached_sec("ABC")
+
+    assert data["current_price"] == 42.0
+    assert data["risk_free_rate"] == 4.2
+    assert data["data_source"] == "sec"
+    assert statements.calls == quote.calls == 1
+    # Statements are kept for hours; the price for minutes.
+    assert fetch.QUOTE_TTL_SECONDS <= 15 * 60
+
+
+def test_unknown_sec_ticker_fails_before_any_price_request(monkeypatch):
+    from data import sec
+
+    quote = _LiveStub(result={"current_price": 1.0, "risk_free_rate": 4.0})
+    monkeypatch.setattr(
+        fetch, "_cached_sec_statements", _LiveStub(error=sec.SecDataError("unknown"))
+    )
+    monkeypatch.setattr(fetch, "_cached_quote", quote)
+
+    with pytest.raises(sec.SecDataError):
+        fetch._cached_sec("ZZZZ")
+    assert quote.calls == 0

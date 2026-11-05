@@ -4,6 +4,8 @@ Type a stock ticker and get an automatically built discounted cash flow (DCF) va
 
 **Live app:** [easy-dcf.streamlit.app](https://easy-dcf.streamlit.app)
 
+> If charts, tables or buttons show a red "Failed to fetch dynamically imported module" error, an ad blocker or privacy extension is blocking Streamlit's files. Allow-list the site or pause the blocker, then hard refresh (Ctrl+Shift+R).
+
 ![Valuation tab](screenshots/valuation.png)
 
 ## Features
@@ -35,12 +37,14 @@ The model projects five years of unlevered free cash flow and discounts it at th
 | --- | --- |
 | Revenue growth | Historical revenue CAGR, capped at −5% to 20%, fading linearly to terminal growth by year 5 (the Fade profile; Flat holds the CAGR instead) |
 | EBIT margin, D&A %, CapEx % | 3-year averages as a share of revenue |
-| ΔNWC | Historical change in working capital ÷ change in revenue, clamped to 0–20%; 5% when the history is unstable |
+| ΔNWC | Total working-capital investment ÷ total revenue added over the last 3 years, clamped to −10% to 20%. It can be negative for businesses their suppliers fund, like Costco. Falls back to 5% when revenue shrank or barely grew. |
 | Tax rate | 3-year effective rate, clamped to 10–30% |
 | Risk-free rate | Current 10-year U.S. Treasury yield |
-| Beta / equity risk premium | Beta from Yahoo Finance / 5.0% |
+| Beta / equity risk premium | Adjusted beta: ⅔ × raw beta + ⅓ × 1.0 (the Blume adjustment Bloomberg reports), because measured betas drift toward 1.0 over time. Raw beta comes from Yahoo Finance, or on the hosted app is estimated from 5 years of monthly returns against the S&P 500. / 5.0% |
 | Cost of debt | Interest expense ÷ total debt; falls back to risk-free + 1.5% |
 | Terminal growth / exit multiple | 2.5% / current EV/EBITDA |
+
+EBITDA always means operating income + D&A, the same measure the exit-multiple terminal value is applied to. Yahoo's own EBITDA figure starts from pretax income and can differ by 20% or more, so it isn't used.
 
 The Valuation tab lists every assumption with its value and source, and marks any you've edited.
 
@@ -65,7 +69,7 @@ It reuses the DCF's exact math, and the tests prove it: with every standard devi
 The app tries each source in order and labels what it used:
 
 1. **Yahoo Finance** (via yfinance): statements, price, beta and news. Used whenever it works, which is usually the case when running locally.
-2. **SEC EDGAR + Yahoo prices**: Yahoo blocks statement requests from shared cloud servers like Streamlit Cloud, but still serves price history. The app then reads annual statements from the SEC's free [XBRL API](https://www.sec.gov/search-filings/edgar-application-programming-interfaces) (`data/sec.py`), and estimates beta from five years of monthly returns against the S&P 500.
+2. **SEC EDGAR + Yahoo prices**: Yahoo blocks statement requests from shared cloud servers like Streamlit Cloud, but still serves price history. The app then reads annual statements from the SEC's free [XBRL API](https://www.sec.gov/search-filings/edgar-application-programming-interfaces) (`data/sec.py`), and estimates beta from five years of monthly returns against the S&P 500. Statements are reused for 6 hours; the price and Treasury yield refresh every 10 minutes.
 3. **Saved snapshots**: real data saved for about 25 popular tickers (`data/snapshots/`), shown with the date it was saved if both live sources fail.
 
 The SEC asks API users to identify themselves, so the SEC step only runs when a `SEC_USER_AGENT` setting is present, such as `DCF Tool your.email@example.com`. On Streamlit Cloud it's set under **Settings → Secrets**:
@@ -88,6 +92,8 @@ The DCF engine is pure Python with no data or UI code, so it can be tested on it
 | Value per share (10× exit multiple) | $41.40 |
 
 Other tests cover the assumption clamps and unit conversions, the multiples, the news parser (using a saved real response), terminal growth ≥ WACC raising an error (for Gordon growth only), and the mid-year convention. With mid-year discounting on, a Gordon terminal value uses the final year's mid-year factor, while an exit-multiple terminal value, which models a sale at the end of year 5, is discounted over the full five years. The Monte Carlo engine is tested against `run_dcf` as described above, plus checks for reproducible seeds and for no NaN or infinite values when terminal growth sits close to WACC.
+
+`tests/test_app.py` runs the whole app on saved data the way a visitor would: several companies, both terminal methods and ticker switches in one session, checking that nothing crashes and every tab renders.
 
 ## Screenshots
 
@@ -117,13 +123,13 @@ ui/
   sidebar.py         Assumption controls
   tables.py          Table formatting
 scripts/             Snapshot refresh and SEC-vs-Yahoo check
-tests/               pytest suite
+tests/               pytest suite, including full-app tests on saved data
 docs/                Excel answer key
 ```
 
 ## Run it locally
 
-Requires Python 3.12 or newer.
+Requires Python 3.11 or newer.
 
 ```powershell
 git clone https://github.com/cdimm49/dcf-tool.git
@@ -136,9 +142,10 @@ streamlit run app.py
 
 If PowerShell blocks the activate script, run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once.
 
-Run the tests:
+Run the tests (pytest is in a separate file so the deployed app doesn't install it):
 
 ```bash
+pip install -r requirements-dev.txt
 python -m pytest -v
 ```
 
