@@ -1,5 +1,7 @@
 import numpy as np
 
+from model.dcf import TERMINAL_CAPEX_TO_DA
+
 
 def _unit_draws(rng, distribution, size):
     """Zero-mean, unit-std draws; callers scale by the std they want."""
@@ -88,7 +90,17 @@ def run_monte_carlo_dcf(
         cap = wacc - 0.005
         clamped = terminal_growth > cap
         terminal_growth = np.minimum(terminal_growth, cap)
-        terminal_value = fcff[:, -1] * (1 + terminal_growth) / (wacc - terminal_growth)
+        # Same normalized terminal year as run_dcf.
+        terminal_revenue = revenue[:, -1] * (1 + terminal_growth)
+        terminal_da = terminal_revenue * base_inputs["da_pct_revenue"]
+        terminal_fcff = (
+            terminal_revenue * margin[:, 0] * (1 - base_inputs["tax_rate"])
+            + terminal_da
+            - terminal_da * TERMINAL_CAPEX_TO_DA
+            - (terminal_revenue - revenue[:, -1])
+            * base_inputs["delta_nwc_pct_revenue_change"]
+        )
+        terminal_value = terminal_fcff / (wacc - terminal_growth)
         pv_terminal_value = terminal_value * discount_factor[:, -1]
         pct_clamped = float(clamped.mean())
     else:

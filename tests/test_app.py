@@ -85,3 +85,37 @@ def test_football_field_renders_without_52_week_request(app, monkeypatch, ticker
     assert "DCF: Gordon growth" in shown.value
     assert "Monte Carlo (P10–P90)" in shown.value
     assert requested == []
+
+
+def _captions(app):
+    return [caption.value for caption in app.caption]
+
+
+def test_netflix_shows_da_warning_notes_and_implied_multiple(app):
+    _load(app, "NFLX")
+    assert any("far above capex" in w for w in _warnings(app))
+    captions = " ".join(_captions(app))
+    assert "capex is set to 1.1× D&A" in captions
+    assert "add-back is limited to capex" in captions
+    assert _metric(app, "Implied exit EV / EBITDA (from Gordon growth)") is not None
+
+
+def test_coca_cola_has_no_da_warning_and_still_shows_the_rules(app):
+    _load(app, "KO")  # D&A 2.3% of revenue, capex 4.3%
+    assert not any("far above capex" in w for w in _warnings(app))
+    captions = " ".join(_captions(app))
+    assert "capex is set to 1.1× D&A" in captions
+    assert "used as reported" in captions
+
+
+def test_editing_da_far_above_capex_triggers_the_warning(app):
+    _load(app, "AAPL")
+    app.slider(key="dcf_da_pct_revenue").set_value(10.0).run()
+    assert any("far above capex" in w for w in _warnings(app))
+
+
+def test_apple_tiny_da_capex_gap_shows_no_cap_note(app):
+    _load(app, "AAPL")  # D&A 2.9% vs capex 2.8%: inside the 0.5-point tolerance
+    captions = " ".join(_captions(app))
+    assert "add-back is limited to capex" not in captions
+    assert "used as reported" in captions

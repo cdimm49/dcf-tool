@@ -95,3 +95,13 @@ def test_missing_or_nonpositive_shares_raise(base_inputs, shares):
     base_inputs["diluted_shares"] = shares
     with pytest.raises(ValueError):
         run_monte_carlo_dcf(base_inputs)
+
+
+def test_zero_std_matches_run_dcf_with_heavy_capex_and_fast_final_year(base_inputs):
+    # The terminal-year normalization is what differs from the old formula here.
+    base_inputs.update(
+        capex_pct_revenue=0.40, growth_rates=[0.2] * 5, delta_nwc_pct_revenue_change=0.15
+    )
+    expected = run_dcf(**base_inputs)["value_per_share"]
+    result = run_monte_carlo_dcf(base_inputs, n_simulations=200, **ZERO_STD)
+    np.testing.assert_allclose(result["simulated_share_prices"], expected, rtol=0, atol=1e-9)

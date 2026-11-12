@@ -1,5 +1,9 @@
 import pandas as pd
 
+# In the terminal year a company replaces its worn-out assets and adds 10% on top
+# to support growth, instead of repeating today's (often much larger) capex forever.
+TERMINAL_CAPEX_TO_DA = 1.1
+
 
 def run_dcf(
     base_revenue,
@@ -59,12 +63,28 @@ def run_dcf(
     sum_pv_fcff = forecast["PV"].sum()
     final_year = forecast.iloc[-1]
 
+    implied_exit_multiple = None
     if terminal_method == "gordon":
-        terminal_value = (
-            final_year["FCFF"]
-            * (1 + terminal_growth)
-            / (wacc - terminal_growth)
+        # Normalized terminal-year cash flow: one more year of growth, with capex
+        # set to a small premium over D&A and working capital sized to that growth.
+        terminal_revenue = final_year["Revenue"] * (1 + terminal_growth)
+        terminal_da = terminal_revenue * da_pct_revenue
+        terminal_fcff = (
+            terminal_revenue * ebit_margin * (1 - tax_rate)
+            + terminal_da
+            - terminal_da * TERMINAL_CAPEX_TO_DA
+            - (terminal_revenue - final_year["Revenue"])
+            * delta_nwc_pct_revenue_change
         )
+        terminal_value = terminal_fcff / (wacc - terminal_growth)
+        # Gordon TV sits at N - 0.5 under mid-year; move it to year-end N so it
+        # is comparable with an exit multiple, which assumes a sale at year-end N.
+        final_ebitda = final_year["EBIT"] + final_year["D&A"]
+        if final_ebitda > 0:
+            year_end_value = terminal_value * (
+                (1 + wacc) ** 0.5 if mid_year else 1
+            )
+            implied_exit_multiple = year_end_value / final_ebitda
     else:
         terminal_value = (
             final_year["EBIT"] + final_year["D&A"]
@@ -84,6 +104,7 @@ def run_dcf(
         "forecast": forecast,
         "sum_pv_fcff": sum_pv_fcff,
         "terminal_value": terminal_value,
+        "implied_exit_multiple": implied_exit_multiple,
         "pv_terminal_value": pv_terminal_value,
         "enterprise_value": enterprise_value,
         "equity_value": equity_value,

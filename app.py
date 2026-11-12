@@ -9,7 +9,7 @@ from data.fetch import SEC_SOURCE_NOTE, get_52_week_range, get_company_data
 from data.news import get_recent_news
 from data.snapshots import available_snapshots, load_saved_news
 from model.assumptions import DCF_INPUTS, default_assumptions
-from model.dcf import run_dcf
+from model.dcf import TERMINAL_CAPEX_TO_DA, run_dcf
 from model.football_field import football_field
 from model.monte_carlo import run_monte_carlo_dcf
 from model.multiples import calculate_multiples
@@ -232,6 +232,40 @@ def _cached_company_multiples(ticker, include_securities):
     }
 
 
+DA_WARNING_RATIO = 2
+
+
+def _da_far_above_capex(assumptions):
+    """True when D&A (as reported, or as edited in the sidebar) is far above capex."""
+    capex = assumptions.get("capex_pct_revenue") or 0.0
+    return any(
+        (assumptions.get(name) or 0.0) > DA_WARNING_RATIO * capex
+        for name in ("da_reported_pct_revenue", "da_pct_revenue")
+    )
+
+
+def _display_assumption_notes(assumptions):
+    """Plain-English lines explaining the two rules that shape the cash flows."""
+    st.caption(
+        f"Terminal year (Gordon growth): capex is set to {TERMINAL_CAPEX_TO_DA:.1f}× "
+        "D&A, meaning the company replaces its worn-out assets and adds 10% on top to "
+        "grow. Today's capex share is not repeated forever, so a heavy spender is not "
+        "assumed to spend that much forever. The exit-multiple method does not use it."
+    )
+    reported = assumptions.get("da_reported_pct_revenue")
+    if assumptions.get("da_capped") and reported is not None:
+        st.caption(
+            f"D&A add-back: reported D&A is {reported:.1%} of revenue but capex is only "
+            f"{assumptions['capex_pct_revenue']:.1%}. Only depreciation whose spending "
+            "shows up in capex is added back, so the add-back is limited to capex "
+            "(content or acquired-asset amortization has a cash cost outside capex)."
+        )
+    else:
+        st.caption(
+            "D&A add-back: reported D&A is not meaningfully above capex, so it is used as reported."
+        )
+
+
 def _display_assumptions(assumptions):
     labels = {
         "base_revenue": "Base revenue",
@@ -288,6 +322,7 @@ def _display_assumptions(assumptions):
         ]
     )
     st.subheader("Assumptions used")
+    _display_assumption_notes(assumptions)
     st.dataframe(
         assumptions_table,
         hide_index=True,
@@ -325,6 +360,20 @@ def _display_valuation(assumptions, company_data):
         )
         _display_assumptions(assumptions)
         return None
+
+    if _da_far_above_capex(assumptions):
+        reported = max(
+            assumptions.get("da_reported_pct_revenue") or 0.0,
+            assumptions["da_pct_revenue"],
+        )
+        st.warning(
+            f"D&A ({reported:.1%} of revenue) is far above capex "
+            f"({assumptions['capex_pct_revenue']:.1%}). The difference is often "
+            "amortization of content or acquired assets, which is not paid for "
+            "through capex, so adding it all back would overstate cash flow. By "
+            "default the add-back is limited to capex; raise D&A in the sidebar only "
+            "if you are sure it is a non-cash charge."
+        )
 
     result = run_dcf(
         **{name: assumptions[name] for name in DCF_INPUTS}
@@ -387,6 +436,16 @@ def _display_valuation(assumptions, company_data):
         bridge.style.format({"USD millions": _format_currency}),
         alt="Bridge from enterprise value to equity value",
     )
+
+    implied_multiple = result["implied_exit_multiple"]
+    if implied_multiple is not None:
+        st.metric("Implied exit EV / EBITDA (from Gordon growth)", f"{implied_multiple:.1f}x")
+        st.caption(
+            "The terminal value expressed as a multiple of final-year EBITDA. Compare "
+            "it with the company's current multiple on the Multiples tab: a number far "
+            "above what similar companies trade at suggests the growth or margin "
+            "assumptions are too generous."
+        )
 
     terminal_share = result["terminal_value_pct_ev"]
     if terminal_share is not None:

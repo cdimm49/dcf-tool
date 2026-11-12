@@ -308,3 +308,48 @@ def test_treasury_yield_is_read_as_percent_even_below_one(
     )
 
     assert assumptions["risk_free_rate"] == pytest.approx(expected)
+
+
+def _assumptions_with(company_statements, da_values, capex_values):
+    income, balance, cashflow = company_statements
+    cashflow = cashflow.copy()
+    cashflow.loc["D&A"] = da_values
+    cashflow.loc["CapEx"] = capex_values
+    return default_assumptions(
+        income, balance, cashflow, {"current_price": 50, "diluted_shares_outstanding": 1e9}
+    )
+
+
+def test_da_add_back_is_limited_to_capex_when_da_is_far_above_it(company_statements):
+    # Revenue is 1000/800/... so D&A of 400 is ~40-50% of revenue vs capex ~8%.
+    assumptions = _assumptions_with(
+        company_statements, [400, 400, 400], [-80, -64, -48]
+    )
+
+    assert assumptions["da_capped"] is True
+    assert assumptions["da_reported_pct_revenue"] > 0.3
+    assert assumptions["da_pct_revenue"] == pytest.approx(assumptions["capex_pct_revenue"])
+    assert "limited to capex" in assumptions["sources"]["da_pct_revenue"]
+
+
+def test_da_add_back_untouched_when_below_capex(company_statements):
+    assumptions = _assumptions_with(
+        company_statements, [20, 16, 12], [-80, -64, -48]
+    )
+
+    assert assumptions["da_capped"] is False
+    assert assumptions["da_pct_revenue"] == pytest.approx(
+        assumptions["da_reported_pct_revenue"]
+    )
+    assert assumptions["da_pct_revenue"] == pytest.approx(0.02)
+
+
+def test_da_note_ignores_gaps_within_half_a_point_of_revenue(company_statements):
+    # Revenue 1000/800/... so D&A 3 vs capex 0 on 1000 is 0.3 points; the cap
+    # still applies, but no note is flagged.
+    small = _assumptions_with(company_statements, [83, 66, 49], [-80, -64, -48])
+    assert small["da_capped"] is False
+    assert small["da_pct_revenue"] == pytest.approx(small["capex_pct_revenue"])
+
+    large = _assumptions_with(company_statements, [90, 72, 54], [-80, -64, -48])
+    assert large["da_capped"] is True

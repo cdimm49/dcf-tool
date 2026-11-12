@@ -78,6 +78,7 @@ def _tax_rate(income):
     )
 
 
+DA_NOTE_TOLERANCE = 0.005
 GROWTH_PROFILES = ("fade", "flat", "custom")
 FORECAST_YEARS = 5
 
@@ -251,6 +252,8 @@ def default_assumptions(
         "ebit_margin": None,
         "tax_rate": None,
         "da_pct_revenue": None,
+        "da_reported_pct_revenue": None,
+        "da_capped": False,
         "capex_pct_revenue": None,
         "delta_nwc_pct_revenue_change": None,
         "wacc": None,
@@ -313,13 +316,6 @@ def default_assumptions(
     da_ratio = _recent_average_ratio(
         cleaned_income, cleaned_cashflow, "D&A", absolute=True
     )
-    assumptions["da_pct_revenue"] = da_ratio if da_ratio is not None else 0.0
-    sources["da_pct_revenue"] = (
-        "Average D&A / revenue for the latest available three years."
-        if da_ratio is not None
-        else "No D&A reported; assumed 0% of revenue."
-    )
-
     capex_ratio = _recent_average_ratio(
         cleaned_income, cleaned_cashflow, "CapEx", absolute=True
     )
@@ -329,6 +325,29 @@ def default_assumptions(
         if capex_ratio is not None
         else "No CapEx reported; assumed 0% of revenue."
     )
+
+    # Only D&A whose spending shows up in capex is added back. Amortization of
+    # things bought outside capex (Netflix's content) is a real cash cost, so
+    # adding it back without that cost would overstate cash flow.
+    reported_da = da_ratio if da_ratio is not None else 0.0
+    assumptions["da_reported_pct_revenue"] = reported_da
+    # The cap itself is always min(D&A, capex); the note only appears for a gap
+    # big enough to matter (more than half a point of revenue).
+    assumptions["da_capped"] = (
+        reported_da - assumptions["capex_pct_revenue"] > DA_NOTE_TOLERANCE
+    )
+    assumptions["da_pct_revenue"] = min(reported_da, assumptions["capex_pct_revenue"])
+    if da_ratio is None:
+        sources["da_pct_revenue"] = "No D&A reported; assumed 0% of revenue."
+    elif assumptions["da_capped"]:
+        sources["da_pct_revenue"] = (
+            f"Reported D&A is {reported_da:.1%} of revenue but capex is only "
+            f"{assumptions['capex_pct_revenue']:.1%}, so the add-back is limited to capex."
+        )
+    else:
+        sources["da_pct_revenue"] = (
+            "Average D&A / revenue for the latest available three years."
+        )
 
     tax_rate, sources["tax_rate"] = _tax_rate(cleaned_income)
     assumptions["tax_rate"] = tax_rate
