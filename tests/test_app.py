@@ -91,31 +91,56 @@ def _captions(app):
     return [caption.value for caption in app.caption]
 
 
-def test_netflix_shows_da_warning_notes_and_implied_multiple(app):
+def _infos(app):
+    return [info.value for info in app.info]
+
+
+def test_netflix_is_capped_with_warning_note_limits_and_implied_multiple(app):
     _load(app, "NFLX")
     assert any("far above capex" in w for w in _warnings(app))
     captions = " ".join(_captions(app))
-    assert "capex is set to 1.1× D&A" in captions
-    assert "add-back is limited to capex" in captions
+    assert "above reported free cash flow" in captions
+    assert "straight line" in captions
+    for number in (1, 2, 3):
+        assert f"Limit {number}" in captions
     assert _metric(app, "Implied exit EV / EBITDA (from Gordon growth)") is not None
 
 
-def test_coca_cola_has_no_da_warning_and_still_shows_the_rules(app):
-    _load(app, "KO")  # D&A 2.3% of revenue, capex 4.3%
+def test_amd_is_not_capped_and_gets_an_info_box_not_a_warning(app):
+    _load(app, "AMD")  # D&A 4x capex, but reported cash flow agrees with the model
     assert not any("far above capex" in w for w in _warnings(app))
+    assert any("far above capex" in i for i in _infos(app))
+    assert "all D&A is added back" in " ".join(_captions(app))
+
+
+@pytest.mark.parametrize("ticker", ["AAPL", "KO", "JNJ", "ADBE"])
+def test_other_companies_are_not_capped(app, ticker):
+    _load(app, ticker)
     captions = " ".join(_captions(app))
-    assert "capex is set to 1.1× D&A" in captions
-    assert "used as reported" in captions
+    assert "all D&A is added back" in captions
+    assert "above reported free cash flow" not in captions
 
 
-def test_editing_da_far_above_capex_triggers_the_warning(app):
-    _load(app, "AAPL")
-    app.slider(key="dcf_da_pct_revenue").set_value(10.0).run()
-    assert any("far above capex" in w for w in _warnings(app))
-
-
-def test_apple_tiny_da_capex_gap_shows_no_cap_note(app):
-    _load(app, "AAPL")  # D&A 2.9% vs capex 2.8%: inside the 0.5-point tolerance
+def test_editing_the_addback_replaces_the_cap_note(app):
+    _load(app, "NFLX")
+    assert "above reported free cash flow" in " ".join(_captions(app))
+    app.slider(key="dcf_da_addback_pct_revenue").set_value(20.0).run()
     captions = " ".join(_captions(app))
-    assert "add-back is limited to capex" not in captions
-    assert "used as reported" in captions
+    assert "you set the add-back" in captions
+    assert "above reported free cash flow" not in captions
+
+
+def test_editing_da_moves_the_addback_unless_capped(app):
+    _load(app, "KO")
+    app.slider(key="dcf_da_pct_revenue").set_value(3.0).run()
+    assert app.slider(key="dcf_da_addback_pct_revenue").value == 3.0
+    _load(app, "NFLX")
+    app.slider(key="dcf_da_pct_revenue").set_value(35.0).run()
+    assert app.slider(key="dcf_da_addback_pct_revenue").value == pytest.approx(1.2, abs=0.1)
+
+
+def test_ebitda_caveat_shows_for_netflix_only(app):
+    _load(app, "NFLX")
+    assert "rely on the Gordon growth value" in " ".join(_captions(app))
+    _load(app, "AMD")
+    assert "rely on the Gordon growth value" not in " ".join(_captions(app))

@@ -24,6 +24,18 @@ DCF_INPUTS = (
     "mid_year",
 )
 
+# Passed to run_dcf only when present, so older input dicts keep working.
+OPTIONAL_DCF_INPUTS = ("da_addback_pct_revenue",)
+
+
+def dcf_inputs(assumptions):
+    """The run_dcf keyword arguments held in an assumptions dict."""
+    inputs = {name: assumptions[name] for name in DCF_INPUTS}
+    for name in OPTIONAL_DCF_INPUTS:
+        if assumptions.get(name) is not None:
+            inputs[name] = assumptions[name]
+    return inputs
+
 
 def _number(value):
     try:
@@ -78,7 +90,10 @@ def _tax_rate(income):
     )
 
 
-DA_NOTE_TOLERANCE = 0.005
+# The D&A add-back is capped at capex only when the model's cash flow
+# (EBIT x (1 - tax) + D&A - capex) beats the company's reported free cash flow
+# by more than this share of revenue, averaged over up to three years.
+DA_CAP_GAP_THRESHOLD = 0.15
 GROWTH_PROFILES = ("fade", "flat", "custom")
 FORECAST_YEARS = 5
 
@@ -210,6 +225,36 @@ def _risk_free_rate(market_data):
     return rate, "Current ^TNX 10-year Treasury yield, normalized to a decimal rate."
 
 
+def _model_vs_reported_cash_flow_gap(income, cashflow, tax_rate):
+    """Average (model cash flow - reported free cash flow) / revenue, or None.
+
+    Model cash flow is EBIT x (1 - tax) + D&A - capex, before working capital.
+    Reported free cash flow is the statement's own figure, or operating cash
+    flow minus capex. Uses up to three recent years that have every figure.
+    """
+    revenue = _row_values(income, "Revenue")
+    ebit = _row_values(income, "EBIT")
+    da = _row_values(cashflow, "D&A")
+    capex = _row_values(cashflow, "CapEx")
+    reported = _row_values(cashflow, "Free Cash Flow")
+    operating = _row_values(cashflow, "Operating Cash Flow")
+    gaps = []
+    for column in income.columns:
+        rev = _number(revenue.get(column))
+        values = [_number(x.get(column)) for x in (ebit, da, capex)]
+        fcf = _number(reported.get(column))
+        if fcf is None and values[2] is not None:
+            ocf = _number(operating.get(column))
+            fcf = None if ocf is None else ocf - abs(values[2])
+        if not rev or fcf is None or None in values:
+            continue
+        model = values[0] * (1 - tax_rate) + abs(values[1]) - abs(values[2])
+        gaps.append((model - fcf) / rev)
+        if len(gaps) == 3:
+            break
+    return sum(gaps) / len(gaps) if gaps else None
+
+
 def default_assumptions(
     cleaned_income,
     cleaned_balance,
@@ -252,8 +297,9 @@ def default_assumptions(
         "ebit_margin": None,
         "tax_rate": None,
         "da_pct_revenue": None,
-        "da_reported_pct_revenue": None,
-        "da_capped": False,
+        "da_addback_pct_revenue": None,
+        "da_cap_status": "no_cap",
+        "da_cash_gap": None,
         "capex_pct_revenue": None,
         "delta_nwc_pct_revenue_change": None,
         "wacc": None,
@@ -275,6 +321,7 @@ def default_assumptions(
         "ebit_margin": "Unavailable; no reported EBIT / revenue history.",
         "tax_rate": "",
         "da_pct_revenue": "",
+        "da_addback_pct_revenue": "",
         "capex_pct_revenue": "",
         "delta_nwc_pct_revenue_change": "",
         "wacc": "",
@@ -326,31 +373,49 @@ def default_assumptions(
         else "No CapEx reported; assumed 0% of revenue."
     )
 
-    # Only D&A whose spending shows up in capex is added back. Amortization of
-    # things bought outside capex (Netflix's content) is a real cash cost, so
-    # adding it back without that cost would overstate cash flow.
-    reported_da = da_ratio if da_ratio is not None else 0.0
-    assumptions["da_reported_pct_revenue"] = reported_da
-    # The cap itself is always min(D&A, capex); the note only appears for a gap
-    # big enough to matter (more than half a point of revenue).
-    assumptions["da_capped"] = (
-        reported_da - assumptions["capex_pct_revenue"] > DA_NOTE_TOLERANCE
-    )
-    assumptions["da_pct_revenue"] = min(reported_da, assumptions["capex_pct_revenue"])
-    if da_ratio is None:
-        sources["da_pct_revenue"] = "No D&A reported; assumed 0% of revenue."
-    elif assumptions["da_capped"]:
-        sources["da_pct_revenue"] = (
-            f"Reported D&A is {reported_da:.1%} of revenue but capex is only "
-            f"{assumptions['capex_pct_revenue']:.1%}, so the add-back is limited to capex."
-        )
-    else:
-        sources["da_pct_revenue"] = (
-            "Average D&A / revenue for the latest available three years."
-        )
-
     tax_rate, sources["tax_rate"] = _tax_rate(cleaned_income)
     assumptions["tax_rate"] = tax_rate
+
+    # D&A stays as reported (it feeds EBITDA, so exit and peer multiples stay
+    # consistent). Only the add-back to cash flow can be limited: when the model's
+    # cash flow beats reported free cash flow by a wide margin, some amortization
+    # (Netflix's content) has a cash cost outside capex.
+    reported_da = da_ratio if da_ratio is not None else 0.0
+    assumptions["da_pct_revenue"] = reported_da
+    sources["da_pct_revenue"] = (
+        "Average D&A / revenue for the latest available three years."
+        if da_ratio is not None
+        else "No D&A reported; assumed 0% of revenue."
+    )
+    gap = _model_vs_reported_cash_flow_gap(
+        cleaned_income, cleaned_cashflow, tax_rate
+    )
+    assumptions["da_cash_gap"] = gap
+    addback = reported_da
+    if capex_ratio is None:
+        status = "capex_missing"
+        source = "All D&A added back: no capex was reported, so the cap could not be checked."
+    elif gap is None:
+        status = "fcf_missing"
+        source = (
+            "All D&A added back: no reported free cash flow to check the model against."
+        )
+    elif gap > DA_CAP_GAP_THRESHOLD:
+        status = "capped"
+        addback = min(reported_da, capex_ratio)
+        source = (
+            f"Limited to capex ({capex_ratio:.1%} of revenue): model cash flow is "
+            f"{gap:.0%} of revenue above reported free cash flow."
+        )
+    else:
+        status = "no_cap"
+        source = (
+            "All D&A added back: model cash flow is within "
+            f"{DA_CAP_GAP_THRESHOLD:.0%} of revenue of reported free cash flow."
+        )
+    assumptions["da_cap_status"] = status
+    assumptions["da_addback_pct_revenue"] = addback
+    sources["da_addback_pct_revenue"] = source
 
     nwc_ratio, sources["delta_nwc_pct_revenue_change"] = _working_capital_ratio(
         cleaned_income, cleaned_cashflow

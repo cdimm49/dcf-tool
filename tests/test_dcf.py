@@ -34,24 +34,24 @@ def test_gordon_dcf_matches_expected_values(dcf_inputs):
     result = run_dcf(**dcf_inputs)
 
     assert result["forecast"]["FCFF"].tolist() == pytest.approx(
-        [243.00, 264.44, 282.51, 297.82, 310.99], abs=0.01
-    )
-    assert result["sum_pv_fcff"] == pytest.approx(1082.62, abs=0.01)
+        [244.10, 266.82, 286.28, 303.11, 317.87], abs=0.01
+    )  # capex fades from 6.0% of revenue to the terminal 5.5% (1.1 x 5% D&A)
+    assert result["sum_pv_fcff"] == pytest.approx(1096.85, abs=0.01)
     # Terminal year: revenue 1375.13 x 1.03 = 1416.39; NOPAT 339.93; D&A 70.82
     # added back, capex 1.1 x D&A = 77.90 paid; NWC 4.13. FCFF 328.73 / (8.8% - 3%).
     assert result["terminal_value"] == pytest.approx(5667.68, abs=0.01)
     assert result["pv_terminal_value"] == pytest.approx(3717.59, abs=0.01)
-    assert result["enterprise_value"] == pytest.approx(4800.21, abs=0.01)
-    assert result["equity_value"] == pytest.approx(4700.21, abs=0.01)
-    assert result["value_per_share"] == pytest.approx(47.00, abs=0.01)
+    assert result["enterprise_value"] == pytest.approx(4814.44, abs=0.01)
+    assert result["equity_value"] == pytest.approx(4714.44, abs=0.01)
+    assert result["value_per_share"] == pytest.approx(47.14, abs=0.01)
 
 
 def test_exit_multiple_dcf_matches_expected_values(dcf_inputs):
     dcf_inputs["terminal_method"] = "exit"
     result = run_dcf(**dcf_inputs)
 
-    assert result["enterprise_value"] == pytest.approx(4239.57, abs=0.01)
-    assert result["value_per_share"] == pytest.approx(41.40, abs=0.01)
+    assert result["enterprise_value"] == pytest.approx(4253.81, abs=0.01)
+    assert result["value_per_share"] == pytest.approx(41.54, abs=0.01)
 
 
 def test_terminal_growth_must_be_less_than_wacc(dcf_inputs):
@@ -74,7 +74,7 @@ def test_exit_multiple_ignores_terminal_growth_above_wacc(dcf_inputs):
 
     result = run_dcf(**dcf_inputs)
 
-    assert result["enterprise_value"] == pytest.approx(4239.57, abs=0.01)
+    assert result["enterprise_value"] == pytest.approx(4253.81, abs=0.01)
 
 
 def test_mid_year_discounts_exit_value_full_years_and_gordon_mid_year(dcf_inputs):
@@ -115,7 +115,7 @@ def test_negative_equity_value_is_not_floored(dcf_inputs):
 
     result = run_dcf(**dcf_inputs)
 
-    assert result["equity_value"] == pytest.approx(4800.21 - 10_000 + 100, abs=0.01)
+    assert result["equity_value"] == pytest.approx(4814.44 - 10_000 + 100, abs=0.01)
     assert result["value_per_share"] < 0
 
 
@@ -157,3 +157,65 @@ def test_implied_exit_multiple_absent_for_exit_method_or_negative_ebitda(dcf_inp
     assert run_dcf(**{**dcf_inputs, "terminal_method": "exit"})["implied_exit_multiple"] is None
     losing = run_dcf(**{**dcf_inputs, "ebit_margin": -0.5, "da_pct_revenue": 0.05})
     assert losing["implied_exit_multiple"] is None
+
+
+def test_capex_fades_in_a_straight_line_to_the_terminal_level(dcf_inputs):
+    forecast = run_dcf(**dcf_inputs)["forecast"]
+    capex_pct = (forecast["CapEx"] / forecast["Revenue"]).tolist()
+    # Today 6.0%; terminal level 1.1 x min(5% add-back, 6% capex) = 5.5%.
+    assert capex_pct == pytest.approx([0.059, 0.058, 0.057, 0.056, 0.055])
+
+
+def test_year_five_and_terminal_year_cash_flow_line_up(dcf_inputs):
+    dcf_inputs["growth_rates"] = [0.03] * 5  # same growth, so only capex could differ
+    result = run_dcf(**dcf_inputs)
+    last = result["forecast"].iloc[-1]
+    terminal_fcff = result["terminal_value"] * (0.088 - 0.03)
+    terminal_revenue = last["Revenue"] * 1.03
+    assert terminal_fcff / terminal_revenue == pytest.approx(
+        last["FCFF"] / last["Revenue"]
+    )
+
+
+def test_terminal_capex_uses_the_smaller_of_addback_and_todays_capex(dcf_inputs):
+    # Capex (2%) below the D&A add-back (5%): terminal capex is 1.1 x 2%, not 1.1 x 5%.
+    dcf_inputs["capex_pct_revenue"] = 0.02
+    forecast = run_dcf(**dcf_inputs)["forecast"]
+    assert forecast["CapEx"].iloc[-1] / forecast["Revenue"].iloc[-1] == pytest.approx(
+        0.022
+    )
+
+
+def test_addback_defaults_to_reported_da(dcf_inputs):
+    default = run_dcf(**dcf_inputs)
+    explicit = run_dcf(**dcf_inputs, da_addback_pct_revenue=0.05)
+    assert explicit["value_per_share"] == pytest.approx(default["value_per_share"])
+    assert (default["forecast"]["D&A add-back"] == default["forecast"]["D&A"]).all()
+
+
+def test_limiting_the_addback_lowers_cash_flow_but_not_ebitda_or_exit_value(dcf_inputs):
+    dcf_inputs["terminal_method"] = "exit"
+    full = run_dcf(**dcf_inputs)
+    limited = run_dcf(**dcf_inputs, da_addback_pct_revenue=0.01)
+    # The exit multiple is applied to reported EBITDA (EBIT + all D&A).
+    assert limited["terminal_value"] == pytest.approx(full["terminal_value"])
+    assert (limited["forecast"]["D&A"] == full["forecast"]["D&A"]).all()
+    # Year 1 has less add-back to count on. Later years differ because terminal
+    # capex also scales with the add-back (1.1 x 1% here), so only year 1 is compared.
+    assert limited["forecast"]["FCFF"].iloc[0] < full["forecast"]["FCFF"].iloc[0]
+    assert limited["value_per_share"] < full["value_per_share"]
+
+
+def test_implied_multiple_uses_reported_ebitda_even_with_a_limited_addback(dcf_inputs):
+    result = run_dcf(**dcf_inputs, da_addback_pct_revenue=0.01)
+    last = result["forecast"].iloc[-1]
+    assert result["implied_exit_multiple"] == pytest.approx(
+        result["terminal_value"] / (last["EBIT"] + last["D&A"])
+    )
+
+
+def test_negative_terminal_cash_flow_gives_no_implied_multiple(dcf_inputs):
+    dcf_inputs["ebit_margin"] = 0.0  # EBITDA stays positive (D&A), terminal FCFF < 0
+    result = run_dcf(**dcf_inputs)
+    assert result["terminal_value"] < 0
+    assert result["implied_exit_multiple"] is None

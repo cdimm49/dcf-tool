@@ -25,6 +25,10 @@ def _initial_values(defaults):
         "dcf_ebit_margin": float(defaults.get("ebit_margin") or 0.0) * 100,
         "dcf_tax_rate": float(defaults.get("tax_rate") or 0.0) * 100,
         "dcf_da_pct_revenue": float(defaults.get("da_pct_revenue") or 0.0) * 100,
+        "dcf_da_addback_pct_revenue": float(
+            defaults.get("da_addback_pct_revenue") or 0.0
+        )
+        * 100,
         "dcf_capex_pct_revenue": float(defaults.get("capex_pct_revenue") or 0.0)
         * 100,
         "dcf_delta_nwc_pct_revenue_change": float(
@@ -112,6 +116,14 @@ def _cash_for_securities_choice(included_cash, excluded_cash):
         st.session_state["dcf_cash"] = included_cash
     else:
         st.session_state["dcf_cash"] = excluded_cash
+
+
+def _da_moved(cap_status):
+    # Without a cap, the add-back follows D&A, as it did before the cap existed.
+    if cap_status != "capped":
+        st.session_state["dcf_da_addback_pct_revenue"] = st.session_state[
+            "dcf_da_pct_revenue"
+        ]
 
 
 def _slider_bounds(default, minimum, maximum):
@@ -202,6 +214,15 @@ def build_sidebar(ticker, defaults, company_data):
                 "D&A as a share of revenue",
                 "dcf_da_pct_revenue",
                 defaults.get("da_pct_revenue"),
+                0,
+                30,
+                on_change=_da_moved,
+                args=(defaults.get("da_cap_status"),),
+            )
+            da_addback_pct_revenue = _rate_slider(
+                "D&A added back to cash flow",
+                "dcf_da_addback_pct_revenue",
+                defaults.get("da_addback_pct_revenue"),
                 0,
                 30,
             )
@@ -423,6 +444,7 @@ def build_sidebar(ticker, defaults, company_data):
         "ebit_margin": ebit_margin,
         "tax_rate": tax_rate,
         "da_pct_revenue": da_pct_revenue,
+        "da_addback_pct_revenue": da_addback_pct_revenue,
         "capex_pct_revenue": capex_pct_revenue,
         "delta_nwc_pct_revenue_change": delta_nwc_pct_revenue_change,
         "wacc": current_wacc,
@@ -464,6 +486,7 @@ def build_sidebar(ticker, defaults, company_data):
             "ebit_margin",
             "tax_rate",
             "da_pct_revenue",
+            "da_addback_pct_revenue",
             "capex_pct_revenue",
             "delta_nwc_pct_revenue_change",
             "wacc",

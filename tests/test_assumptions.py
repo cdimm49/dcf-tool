@@ -308,48 +308,77 @@ def test_treasury_yield_is_read_as_percent_even_below_one(
     )
 
     assert assumptions["risk_free_rate"] == pytest.approx(expected)
-
-
-def _assumptions_with(company_statements, da_values, capex_values):
+def _with_cash(company_statements, da, capex, fcf=None, ocf=None, drop=()):
+    """Cash-flow rows as shares of revenue (1000/800/600). NOPAT is 14% of revenue."""
     income, balance, cashflow = company_statements
-    cashflow = cashflow.copy()
-    cashflow.loc["D&A"] = da_values
-    cashflow.loc["CapEx"] = capex_values
+    cashflow = cashflow.astype(float)
+    revenue = income.loc["Revenue"]
+    cashflow.loc["D&A"] = revenue * da
+    cashflow.loc["CapEx"] = -revenue * capex
+    if fcf is not None:
+        cashflow.loc["Free Cash Flow"] = revenue * fcf
+    if ocf is not None:
+        cashflow.loc["Operating Cash Flow"] = revenue * ocf
+    cashflow = cashflow.drop(index=list(drop))
     return default_assumptions(
         income, balance, cashflow, {"current_price": 50, "diluted_shares_outstanding": 1e9}
     )
 
 
-def test_da_add_back_is_limited_to_capex_when_da_is_far_above_it(company_statements):
-    # Revenue is 1000/800/... so D&A of 400 is ~40-50% of revenue vs capex ~8%.
-    assumptions = _assumptions_with(
-        company_statements, [400, 400, 400], [-80, -64, -48]
-    )
+def test_netflix_like_amortization_is_limited_to_capex(company_statements):
+    # Model cash flow 14% + 40% - 1% = 53% vs reported 20%: a 33-point gap.
+    a = _with_cash(company_statements, da=0.40, capex=0.01, fcf=0.20)
 
-    assert assumptions["da_capped"] is True
-    assert assumptions["da_reported_pct_revenue"] > 0.3
-    assert assumptions["da_pct_revenue"] == pytest.approx(assumptions["capex_pct_revenue"])
-    assert "limited to capex" in assumptions["sources"]["da_pct_revenue"]
-
-
-def test_da_add_back_untouched_when_below_capex(company_statements):
-    assumptions = _assumptions_with(
-        company_statements, [20, 16, 12], [-80, -64, -48]
-    )
-
-    assert assumptions["da_capped"] is False
-    assert assumptions["da_pct_revenue"] == pytest.approx(
-        assumptions["da_reported_pct_revenue"]
-    )
-    assert assumptions["da_pct_revenue"] == pytest.approx(0.02)
+    assert a["da_cap_status"] == "capped"
+    assert a["da_cash_gap"] == pytest.approx(0.33)
+    assert a["da_pct_revenue"] == pytest.approx(0.40)  # reported D&A stays for EBITDA
+    assert a["da_addback_pct_revenue"] == pytest.approx(0.01)
+    assert "Limited to capex" in a["sources"]["da_addback_pct_revenue"]
 
 
-def test_da_note_ignores_gaps_within_half_a_point_of_revenue(company_statements):
-    # Revenue 1000/800/... so D&A 3 vs capex 0 on 1000 is 0.3 points; the cap
-    # still applies, but no note is flagged.
-    small = _assumptions_with(company_statements, [83, 66, 49], [-80, -64, -48])
-    assert small["da_capped"] is False
-    assert small["da_pct_revenue"] == pytest.approx(small["capex_pct_revenue"])
+def test_acquirer_like_amortization_is_not_capped_when_reported_cash_flow_agrees(
+    company_statements,
+):
+    # AMD-like (D&A 4x capex) and J&J-like (D&A above capex): small gaps, no cap.
+    for da, capex, fcf in ((0.12, 0.03, 0.11), (0.08, 0.06, 0.13)):
+        a = _with_cash(company_statements, da=da, capex=capex, fcf=fcf)
+        assert a["da_cap_status"] == "no_cap"
+        assert a["da_addback_pct_revenue"] == pytest.approx(da)
+        assert a["da_pct_revenue"] == pytest.approx(da)
 
-    large = _assumptions_with(company_statements, [90, 72, 54], [-80, -64, -48])
-    assert large["da_capped"] is True
+
+def test_cap_threshold_is_fifteen_points_of_revenue(company_statements):
+    from model.assumptions import DA_CAP_GAP_THRESHOLD
+
+    assert DA_CAP_GAP_THRESHOLD == 0.15
+    # Model cash flow = 14% + 10% - 3% = 21%.
+    just_over = _with_cash(company_statements, da=0.10, capex=0.03, fcf=0.0595)
+    just_under = _with_cash(company_statements, da=0.10, capex=0.03, fcf=0.0605)
+    assert just_over["da_cap_status"] == "capped"
+    assert just_under["da_cap_status"] == "no_cap"
+
+
+def test_operating_cash_flow_minus_capex_is_used_when_free_cash_flow_is_missing(
+    company_statements,
+):
+    # Reported FCF = 21% - 1% = 20%, the same 33-point gap as the Netflix-like case.
+    a = _with_cash(company_statements, da=0.40, capex=0.01, ocf=0.21)
+
+    assert a["da_cap_status"] == "capped"
+    assert a["da_cash_gap"] == pytest.approx(0.33)
+
+
+def test_missing_capex_means_no_cap_and_says_so(company_statements):
+    a = _with_cash(company_statements, da=0.40, capex=0.01, fcf=0.20, drop=["CapEx"])
+
+    assert a["da_cap_status"] == "capex_missing"
+    assert a["da_addback_pct_revenue"] == pytest.approx(0.40)
+    assert "no capex was reported" in a["sources"]["da_addback_pct_revenue"]
+
+
+def test_missing_reported_free_cash_flow_means_no_cap_and_says_so(company_statements):
+    a = _with_cash(company_statements, da=0.40, capex=0.01)  # no FCF or OCF row
+
+    assert a["da_cap_status"] == "fcf_missing"
+    assert a["da_addback_pct_revenue"] == pytest.approx(0.40)
+    assert "no reported free cash flow" in a["sources"]["da_addback_pct_revenue"]

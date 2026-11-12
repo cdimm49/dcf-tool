@@ -7,7 +7,7 @@ invalid is left out rather than returned empty.
 
 from statistics import median
 
-from model.assumptions import DCF_INPUTS
+from model.assumptions import DCF_INPUTS, dcf_inputs
 from model.dcf import run_dcf
 from model.multiples import _latest_value, _number
 
@@ -34,7 +34,7 @@ def _value(inputs):
 def _dcf_range(assumptions, terminal_method):
     if any(assumptions.get(name) is None for name in DCF_INPUTS):
         return None
-    base = {name: assumptions[name] for name in DCF_INPUTS}
+    base = dcf_inputs(assumptions)
     base["terminal_method"] = terminal_method
     wacc = base["wacc"]
 

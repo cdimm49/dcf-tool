@@ -105,3 +105,17 @@ def test_zero_std_matches_run_dcf_with_heavy_capex_and_fast_final_year(base_inpu
     expected = run_dcf(**base_inputs)["value_per_share"]
     result = run_monte_carlo_dcf(base_inputs, n_simulations=200, **ZERO_STD)
     np.testing.assert_allclose(result["simulated_share_prices"], expected, rtol=0, atol=1e-9)
+
+
+def test_zero_std_matches_run_dcf_with_a_limited_addback_and_capex_fade(base_inputs):
+    base_inputs.update(
+        da_pct_revenue=0.12,
+        da_addback_pct_revenue=0.03,
+        capex_pct_revenue=0.25,
+        growth_rates=[0.15, 0.1, 0.05, 0.03, 0.03],
+    )
+    expected = run_dcf(**base_inputs)["value_per_share"]
+    result = run_monte_carlo_dcf(base_inputs, n_simulations=200, **ZERO_STD)
+    np.testing.assert_allclose(
+        result["simulated_share_prices"], expected, rtol=0, atol=1e-9
+    )

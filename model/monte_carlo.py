@@ -76,9 +76,18 @@ def run_monte_carlo_dcf(
     ebit = revenue * margin
     nopat = ebit * (1 - base_inputs["tax_rate"])
     da = revenue * base_inputs["da_pct_revenue"]
-    capex = revenue * base_inputs["capex_pct_revenue"]
+    addback_pct = base_inputs.get("da_addback_pct_revenue")
+    if addback_pct is None:
+        addback_pct = base_inputs["da_pct_revenue"]
+    capex_today = base_inputs["capex_pct_revenue"]
+    terminal_capex_pct = TERMINAL_CAPEX_TO_DA * min(addback_pct, capex_today)
+    # Capex fades in a straight line from today's share to the terminal level.
+    capex_pct = capex_today + (terminal_capex_pct - capex_today) * (
+        np.arange(1, n_years + 1) / n_years
+    )
+    capex = revenue * capex_pct
     delta_nwc = (revenue - prior_revenue) * base_inputs["delta_nwc_pct_revenue_change"]
-    fcff = nopat + da - capex - delta_nwc
+    fcff = nopat + revenue * addback_pct - capex - delta_nwc
 
     years = np.arange(1, n_years + 1, dtype=float)
     mid_year = bool(base_inputs.get("mid_year", False))
@@ -92,11 +101,10 @@ def run_monte_carlo_dcf(
         terminal_growth = np.minimum(terminal_growth, cap)
         # Same normalized terminal year as run_dcf.
         terminal_revenue = revenue[:, -1] * (1 + terminal_growth)
-        terminal_da = terminal_revenue * base_inputs["da_pct_revenue"]
         terminal_fcff = (
             terminal_revenue * margin[:, 0] * (1 - base_inputs["tax_rate"])
-            + terminal_da
-            - terminal_da * TERMINAL_CAPEX_TO_DA
+            + terminal_revenue * addback_pct
+            - terminal_revenue * terminal_capex_pct
             - (terminal_revenue - revenue[:, -1])
             * base_inputs["delta_nwc_pct_revenue_change"]
         )

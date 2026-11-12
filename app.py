@@ -8,11 +8,12 @@ from data.clean import add_income_margins, clean_company_statements
 from data.fetch import SEC_SOURCE_NOTE, get_52_week_range, get_company_data
 from data.news import get_recent_news
 from data.snapshots import available_snapshots, load_saved_news
-from model.assumptions import DCF_INPUTS, default_assumptions
-from model.dcf import TERMINAL_CAPEX_TO_DA, run_dcf
+from model.assumptions import DCF_INPUTS, dcf_inputs, default_assumptions
+from model.dcf import run_dcf
 from model.football_field import football_field
 from model.monte_carlo import run_monte_carlo_dcf
 from model.multiples import calculate_multiples
+from ui import notes
 from ui.sidebar import build_sidebar
 from ui.tables import display_statement
 
@@ -21,6 +22,7 @@ _PERCENT_INPUTS = {
     "ebit_margin",
     "tax_rate",
     "da_pct_revenue",
+    "da_addback_pct_revenue",
     "capex_pct_revenue",
     "delta_nwc_pct_revenue_change",
     "wacc",
@@ -232,38 +234,15 @@ def _cached_company_multiples(ticker, include_securities):
     }
 
 
-DA_WARNING_RATIO = 2
-
-
-def _da_far_above_capex(assumptions):
-    """True when D&A (as reported, or as edited in the sidebar) is far above capex."""
-    capex = assumptions.get("capex_pct_revenue") or 0.0
-    return any(
-        (assumptions.get(name) or 0.0) > DA_WARNING_RATIO * capex
-        for name in ("da_reported_pct_revenue", "da_pct_revenue")
-    )
-
-
 def _display_assumption_notes(assumptions):
-    """Plain-English lines explaining the two rules that shape the cash flows."""
-    st.caption(
-        f"Terminal year (Gordon growth): capex is set to {TERMINAL_CAPEX_TO_DA:.1f}× "
-        "D&A, meaning the company replaces its worn-out assets and adds 10% on top to "
-        "grow. Today's capex share is not repeated forever, so a heavy spender is not "
-        "assumed to spend that much forever. The exit-multiple method does not use it."
-    )
-    reported = assumptions.get("da_reported_pct_revenue")
-    if assumptions.get("da_capped") and reported is not None:
-        st.caption(
-            f"D&A add-back: reported D&A is {reported:.1%} of revenue but capex is only "
-            f"{assumptions['capex_pct_revenue']:.1%}. Only depreciation whose spending "
-            "shows up in capex is added back, so the add-back is limited to capex "
-            "(content or acquired-asset amortization has a cash cost outside capex)."
-        )
-    else:
-        st.caption(
-            "D&A add-back: reported D&A is not meaningfully above capex, so it is used as reported."
-        )
+    """Plain-English lines explaining the rules that shape the cash flows."""
+    st.caption(notes.terminal_note())
+    st.caption(notes.da_note(assumptions))
+    caveat = notes.ebitda_caveat(assumptions)
+    if caveat:
+        st.caption(caveat)
+    for limit in notes.LIMITS:
+        st.caption(limit)
 
 
 def _display_assumptions(assumptions):
@@ -272,7 +251,8 @@ def _display_assumptions(assumptions):
         "growth_rates": "Revenue growth by year",
         "ebit_margin": "EBIT margin",
         "tax_rate": "Tax rate",
-        "da_pct_revenue": "D&A as % of revenue",
+        "da_pct_revenue": "D&A as % of revenue (reported)",
+        "da_addback_pct_revenue": "D&A added back to cash flow",
         "capex_pct_revenue": "CapEx as % of revenue",
         "delta_nwc_pct_revenue_change": "Change in working capital",
         "wacc": "WACC",
@@ -296,6 +276,7 @@ def _display_assumptions(assumptions):
     }
     inputs = (
         *DCF_INPUTS,
+        "da_addback_pct_revenue",
         "risk_free_rate",
         "beta",
         "erp",
@@ -361,23 +342,12 @@ def _display_valuation(assumptions, company_data):
         _display_assumptions(assumptions)
         return None
 
-    if _da_far_above_capex(assumptions):
-        reported = max(
-            assumptions.get("da_reported_pct_revenue") or 0.0,
-            assumptions["da_pct_revenue"],
-        )
-        st.warning(
-            f"D&A ({reported:.1%} of revenue) is far above capex "
-            f"({assumptions['capex_pct_revenue']:.1%}). The difference is often "
-            "amortization of content or acquired assets, which is not paid for "
-            "through capex, so adding it all back would overstate cash flow. By "
-            "default the add-back is limited to capex; raise D&A in the sidebar only "
-            "if you are sure it is a non-cash charge."
-        )
+    da_message = notes.da_warning(assumptions)
+    if da_message:
+        level, text = da_message
+        (st.warning if level == "warning" else st.info)(text)
 
-    result = run_dcf(
-        **{name: assumptions[name] for name in DCF_INPUTS}
-    )
+    result = run_dcf(**dcf_inputs(assumptions))
     current_price = company_data["current_price"]
     upside = (result["value_per_share"] / current_price - 1) * 100
 
@@ -437,15 +407,12 @@ def _display_valuation(assumptions, company_data):
         alt="Bridge from enterprise value to equity value",
     )
 
-    implied_multiple = result["implied_exit_multiple"]
-    if implied_multiple is not None:
-        st.metric("Implied exit EV / EBITDA (from Gordon growth)", f"{implied_multiple:.1f}x")
-        st.caption(
-            "The terminal value expressed as a multiple of final-year EBITDA. Compare "
-            "it with the company's current multiple on the Multiples tab: a number far "
-            "above what similar companies trade at suggests the growth or margin "
-            "assumptions are too generous."
+    if assumptions["terminal_method"] == "gordon":
+        multiple_text, multiple_caption = notes.implied_multiple(
+            result["implied_exit_multiple"], assumptions["exit_ebitda_multiple"]
         )
+        st.metric("Implied exit EV / EBITDA (from Gordon growth)", multiple_text)
+        st.caption(multiple_caption)
 
     terminal_share = result["terminal_value_pct_ev"]
     if terminal_share is not None:
@@ -649,7 +616,7 @@ def _display_sensitivity(assumptions):
     wacc_values = [
         assumptions["wacc"] + (step - 4) * 0.005 for step in range(9)
     ]
-    base_inputs = {name: assumptions[name] for name in DCF_INPUTS}
+    base_inputs = dcf_inputs(assumptions)
 
     if assumptions["terminal_method"] == "gordon":
         # Centered on the current terminal growth, so the middle column is the
@@ -792,7 +759,7 @@ def _display_monte_carlo(assumptions, company_data, valuation_result):
 
     current_price = company_data["current_price"]
     simulation = run_monte_carlo_dcf(
-        {name: assumptions[name] for name in DCF_INPUTS},
+        dcf_inputs(assumptions),
         n_simulations=n_simulations,
         distribution=distribution.lower(),
         growth_std=growth_std / 100,
